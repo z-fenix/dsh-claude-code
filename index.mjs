@@ -53,14 +53,13 @@ export const Config = z.object({
    * 主循环接管开关：true = 用本路由替换宿主全局的 agent factory（Claude Code 预设由
    * ClaudeCodeAgent 驱动）；false = **不碰全局工厂**，只保留预设声明与 LLM provider。
    *
-   * 为什么默认 false：接管全局 factory 意味着**每一个会话**（含 standard / minimal 等
-   * 完全无关的会话）都要经过本插件的代码路径。实测中这条路径一旦出问题，宿主会在启动
-   * 阶段失败，而 DSH 的启动失败会触发 profile 恢复——重写用户的 cordis.patch.yml、
-   * 删掉 node_modules。这个代价不该由一个第三方插件默认承担。
-   *
-   * 想启用主循环替换时显式打开它（profile 的 cordis.patch.yml 里按行 id 覆盖即可）。
+   * 默认 true：不开它预设就是「看得见用不了」——会话照走原生循环并在首轮报
+   * `No API key for provider: local`。代价是每一个会话（含 standard / minimal 等完全
+   * 无关的会话）都要经过本插件的代码路径；一旦踩到 agent-loop 的 setFactory 抢占问题，
+   * 宿主会在启动阶段失败，DSH 的启动失败会触发 profile 恢复——重写用户的
+   * cordis.patch.yml、删掉 node_modules。非接管不可的部署可以显式改回 false。
    */
-  routeMainLoop: z.boolean().default(false),
+  routeMainLoop: z.boolean().default(true),
   /** 未在 engineByPreset 点名的预设使用的引擎 id；deepseek 是「回原生循环」的哨兵。 */
   defaultEngine: z.string().default(DEEPSEEK_ENGINE_ID),
   /** 预设 id → 引擎 id 覆盖表（显式覆盖高于「预设 id 即引擎 id」的自动映射）。 */

@@ -61,18 +61,18 @@ test("插件导出符合 Loader 的函数式插件约定", () => {
 test("Config schema 提供默认值", () => {
   const resolved = new Config({});
   assert.equal(resolved.enabled, true, "默认启用");
-  // 主循环接管默认关闭：它替换的是宿主全局 agent factory，一旦出问题会让宿主启动失败，
-  // 进而触发 DSH 的 profile 恢复（清空用户配置）。这种破坏性能力必须显式开启。
-  assert.equal(resolved.routeMainLoop, false, "默认不接管主循环");
+  // 主循环接管默认开启：不开它预设就是「看得见用不了」——会话照走原生循环并在首轮报
+  // `No API key for provider: local`。代价与回退方式见 index.mjs 的 Config 注释。
+  assert.equal(resolved.routeMainLoop, true, "默认接管主循环");
   assert.equal(resolved.defaultEngine, DEEPSEEK_ENGINE_ID);
   assert.deepEqual(resolved.engineByPreset, {});
   assert.deepEqual(resolved.engines, {});
 });
 
-test("默认（routeMainLoop=false）不碰全局 agent factory，只注册引擎服务", () => {
+test("routeMainLoop=false 不碰全局 agent factory，只注册引擎服务", () => {
   const { ctx, originalFactory, registered } = makeContext();
 
-  apply(ctx, config);
+  apply(ctx, { ...config, routeMainLoop: false });
 
   assert.equal(ctx.agents.factory.target, originalFactory, "全局工厂必须保持原样");
   assert.equal(registered.length, 0, "不接管时不该注册休眠 LLM 路由");

@@ -53,6 +53,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
   name: dsh-claude-code        # restate name whenever you override a row's config
   config:
     enabled: true
+    routeMainLoop: true         # on by default; false leaves the preset visible but unrouted
     defaultEngine: deepseek
     engineByPreset: {}
     engines:
@@ -68,6 +69,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch; `false` leaves the native loop untouched |
+| `routeMainLoop` | `true` | `false` keeps the global factory untouched: the preset is visible but sessions are not routed (safety valve, see index.mjs) |
 | `defaultEngine` | `deepseek` | Engine for presets without a mapping; `deepseek` is the "native loop" sentinel |
 | `engineByPreset` | `{}` | Explicit preset id → engine id overrides |
 | `engines.<id>` | `{}` | Engine-private options, forwarded verbatim |

@@ -53,6 +53,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
   name: dsh-claude-code        # 覆盖行的 config 时必须把 name 一起写回
   config:
     enabled: true
+    routeMainLoop: true          # 默认已开；false = 预设可见但会话不被接管
     defaultEngine: deepseek    # 未选预设的会话走原生循环
     engineByPreset: {}         # 预设 id → 引擎 id 的显式覆盖（可选）
     engines:
@@ -68,6 +69,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `enabled` | `true` | 总闸；`false` = 插件完全不介入 |
+| `routeMainLoop` | `true` | `false` 时不接管全局工厂：预设可见但会话不被接管（安全阀，见 index.mjs 注释） |
 | `defaultEngine` | `deepseek` | 未命中映射的预设用哪个引擎；`deepseek` 是「回原生循环」的哨兵 |
 | `engineByPreset` | `{}` | 预设 id → 引擎 id 覆盖表，优先于「预设 id 即引擎 id」的自动映射 |
 | `engines.<id>` | `{}` | 该引擎的私有配置，插件不解析、原样转发 |

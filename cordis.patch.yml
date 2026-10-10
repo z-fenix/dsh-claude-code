@@ -19,6 +19,9 @@
       name: dsh-claude-code
       config:
         enabled: true
+        # 不开这个开关路由就不会挂到 agent factory 上（index.mjs 默认已是 true，
+        # 这里显式写出，便于部署方按需覆盖为 false）。
+        routeMainLoop: true
         defaultEngine: deepseek
         engineByPreset: {}
         engines:
