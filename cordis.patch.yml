@@ -1,0 +1,151 @@
+# dsh-claude-code bundle patch.
+#
+# Two rows are inserted, both appended after the layers that came before
+# (`@deepseek-ai/dsh-base`, then `@deepseek-ai/dsh-web-app`), which is what the
+# plugin row needs: it captures the live agent factory that `@deepseek-ai/dsh-agent-loop`
+# registered inside the base layer and routes it per agent preset.
+#
+# Plugin options are set from the profile's own cordis.patch.yml, keyed by the row id:
+#   - id: dsh-claude-code
+#     config:
+#       engines:
+#         claude-code: { executable: claude, ... }   # engine-private options; see README
+#
+# The preset is a plain `@deepseek-ai/dsh-agent-preset` declaration: since dsh
+# 0.2.0-rc.2 a preset IS a plugin row, and there is no preset directory any more.
+
+- insert:
+    - id: dsh-claude-code
+      name: dsh-claude-code
+      config:
+        enabled: true
+        defaultEngine: deepseek
+        engineByPreset: {}
+        engines:
+          claude-code:
+            executable: claude
+            persistSession: true
+            includePartialMessages: true
+            traceSubagents: true
+            env: {}
+
+- insert:
+    - id: preset-claude-code
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: claude-code
+        name: Claude Code
+        description: Claude Code persona with the full local tool catalog.
+        order: 99
+        # A preset IS its composition: `@deepseek-ai/dsh-agent-preset` mounts these
+        # rows into the agent scope, and a session's tool catalog is exactly what
+        # this list declares. A persona-only preset therefore yields an agent with
+        # no file, shell, or search tools at all — it can only answer from its own
+        # memory, and truthfully reports that it cannot read files. So this preset
+        # mirrors the shipped `standard` composition (`@deepseek-ai/dsh-web-app`'s
+        # `presets/standard.patch.yml`) and differs only in the persona row.
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are Claude Code, an agent working inside DeepSeek Harness. Your working directory is {{cwd}}.
+                Use the tools available to you to inspect and change the workspace. Never claim a file cannot be read without first attempting the read tool.
+              suffix: Your working directory is {{cwd}}.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              # `section` 是 dsh-plan-mode 的**必填**配置：留空会让它加载失败，报
+              # `PlanModeConfig needs a non-empty 'section'`，并连带让所有引用该预设的会话
+              # 无法创建/恢复。这段文本照抄自 dsh-web-app 的 presets/standard.patch.yml，
+              # 精简预设时绝不能省略。
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          # ── 这里刻意**没有** delegation 组 ──────────────────────────────────
+          #
+          # 实测报错：`tool "subagent" is already registered in this scope`
+          # （@deepseek-ai/dsh-tools 的 tools.register()：先全局、后 agent 作用域，
+          #   同层同名直接抛错）。
+          #
+          # 本预设曾照搬 standard 预设，声明了 tool-subagent / tool-subagent-fork /
+          # tool-workflow 等委派工具。但 `@deepseek-ai/dsh-base` 已经在 host plane 注册了
+          # 这些行（见 dsh-base/cordis.patch.yml 的 tool-subagent-control / tool-subagent /
+          # tool-subagent-fork / workflow-ptc / tool-workflow），dsh-web-app 只是把它们
+          # 在 host plane 上 disabled，语义是「委派工具由预设层选择」。在同时存在其它
+          # 委派工具来源的部署里（例如本机的 experimental agent-team bundle），预设再声明
+          # 一次就会撞名，后果是**所有会话都创建不出来**（failed to create session）。
+          #
+          # 因此这里不再声明委派工具：DSH 的 host plane 已经提供 subagent / subagent_fork /
+          # interrupt_agent / list_agents / send_message / workflow，预设不再重复。
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'

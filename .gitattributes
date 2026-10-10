@@ -1,0 +1,2 @@
+# 统一按 LF 存盘，避免 Windows 上 core.autocrlf 造成的整文件改动噪音
+* text=auto eol=lf

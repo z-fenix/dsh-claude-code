@@ -1,0 +1,8 @@
+# 本地依赖与本机调试产物，不进版本库
+node_modules/
+.dsh-diag/
+
+# 编辑器 / 操作系统
+.DS_Store
+Thumbs.db
+*.swp
