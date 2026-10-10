@@ -287,6 +287,60 @@ test("子代理消息识别", () => {
   assert.equal(isSubagentMessage(null), false);
 });
 
+// 回归护栏（实测故障：后台子代理跑完后主循环「续跑」，整段轨迹被丢弃、界面上什么都不显示）：
+//   SDK 的 query() 流在后台子代理完成时会**接着产出**——先补一条 system/init，再把通知唤醒
+//   出来的助手消息逐条发下来，最后以第二条 result 收尾。而一条 result 只代表 CLI 的**一个
+//   回合**结束，不代表整个 run 结束（实测：第一条 result 之后还有 12 条消息、第 2 条 result）。
+// 因此 result 只能收掉当前 step，不能把 tracer 关掉。
+test("第一条 result 之后的后台续跑仍写进同一个 turn 的新 step", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 7);
+  const modelUsage = { "claude-sonnet-4-5": { contextWindow: 200000 } };
+  tracer.handleMessage({ type: "system", subtype: "init", session_id: "claude-1", model: "claude-sonnet-4-5", tools: ["Bash"] });
+  tracer.handleMessage({
+    type: "assistant",
+    message: { id: "m1", content: [{ type: "text", text: "All 8 generators are running in parallel." }] },
+  });
+  tracer.handleMessage({ type: "result", subtype: "success", result: "第一回合结束", modelUsage });
+  // ── 后台子代理完成，通知唤醒主循环：SDK 继续在同一个流上产出 ──
+  tracer.handleMessage({ type: "system", subtype: "init", session_id: "claude-1", model: "claude-sonnet-4-5", tools: ["Bash"] });
+  tracer.handleMessage({
+    type: "assistant",
+    message: { id: "m2", content: [{ type: "text", text: "Agent 1 done — 92 cases." }] },
+  });
+  tracer.handleMessage({ type: "result", subtype: "success", result: "完成。全量需求测试用例工作台已生成并落盘。", modelUsage });
+  tracer.finish();
+
+  // 续跑只该多出 step，不该重复写 request/header 与 request/context
+  assert.deepEqual(sink.types(), [
+    "request/header",
+    "step/start", "assistant/message", "request/context", "step/end",
+    "step/start", "assistant/message", "step/end",
+  ]);
+  const assistant = sink.events.filter((event) => event.type === "assistant/message");
+  assert.deepEqual(assistant.map((event) => event.data.message.content[0].text), [
+    "All 8 generators are running in parallel.",
+    "Agent 1 done — 92 cases.",
+  ]);
+  // 续跑是**同一个回合**的后续 step，不是新回合
+  assert.deepEqual(assistant.map((event) => event.data.turn), [7, 7]);
+  assert.deepEqual(assistant.map((event) => event.data.step), [1, 2]);
+});
+
+test("result 之后没有后续消息时收尾结果不变（不与 finish 重复写 step/end）", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  tracer.handleMessage({
+    type: "assistant",
+    message: { id: "m1", content: [{ type: "text", text: "only" }] },
+  });
+  tracer.handleMessage({ type: "result", subtype: "success", result: "ok" });
+  tracer.finish();
+
+  // result 收掉当步；finish() 不得再补一条 step/end
+  assert.deepEqual(sink.types(), ["step/start", "assistant/message", "step/end"]);
+});
+
 // 回归护栏（实测故障：会话日志被判损坏、该会话永久打不开）：
 //   SessionFormatError: step/end leaves unresolved tool call call_…
 //   stored session "…" is corrupt
