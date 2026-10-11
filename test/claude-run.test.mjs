@@ -407,3 +407,92 @@ test("已有结果的 tool/call 不会被重复补写", () => {
   const only = sink.events.find((e) => e.type === "tool/result");
   assert.equal(only.data.message.content[0].text, "done");
 });
+
+// ---------------------------------------------------------------------------
+// 原生任务列表 → todo/write 快照：DSH 的任务列表面板读会话日志里的 todo/write
+// 事件（dsh-tool-todo 注册的 session projection）。Claude 引擎下任务工具在 CLI
+// 本地执行、不经过 DSH 工具层，插件必须在流结算处把原生任务操作回放成快照事件。
+// ---------------------------------------------------------------------------
+
+test("TodoWrite 调用后紧随 tool/call 写 todo/write 快照（面板数据源）", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  tracer.handleMessage({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "tw1", name: "TodoWrite", input: { todos: [
+      { content: " 解析需求 ", status: "in_progress" },
+      { content: "提取接口", status: "pending" },
+      { content: "", status: "pending" }, // 空内容 → 丢弃
+      { content: "补测试", status: "bogus" }, // 非法状态 → 丢弃
+      { content: "解析需求", status: "completed" }, // 重复内容 → 丢弃
+    ] } }] },
+  });
+  tracer.handleMessage({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "tw1", content: "ok" }] },
+  });
+  tracer.finish();
+
+  const types = sink.types();
+  const todoIdx = types.indexOf("todo/write");
+  assert.ok(types.includes("todo/write"), "必须写出 todo/write 事件");
+  assert.ok(todoIdx > types.indexOf("tool/call"), "todo/write 必须在 tool/call 之后");
+  assert.ok(todoIdx < types.indexOf("tool/result"), "todo/write 必须在 tool/result 之前");
+  const todo = sink.events[todoIdx];
+  // 面板投影整表替换、无校验：插件侧归一化后如实落盘（允许多个 in_progress）
+  assert.deepEqual(todo.data, { todos: [
+    { content: "解析需求", status: "in_progress" },
+    { content: "提取接口", status: "pending" },
+  ] });
+});
+
+test("TaskCreate / TaskUpdate 原生任务工具回放成任务表（回执绑定 id、补丁排队）", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  // 实测（claude 2.1.296 stream-json）：CLI 逐个执行任务工具，每次调用 → 独立回执，
+  // 交错到达；TaskCreate 的入参只有 subject，真实 id 只在回执文本里。
+  const step = (name, input, callId, resultText) => {
+    tracer.handleMessage({ type: "assistant", message: { content: [
+      { type: "tool_use", id: callId, name, input },
+    ] } });
+    tracer.handleMessage({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: callId, content: resultText },
+    ] } });
+  };
+  step("TaskCreate", { subject: "alpha" }, "c1", "Task #1 created successfully: alpha");
+  step("TaskCreate", { subject: "beta" }, "c2", "Task #2 created successfully: beta");
+  step("TaskCreate", { subject: "gamma" }, "c3", "Task #3 created successfully: gamma");
+  // TaskUpdate 按 CLI 任务系统的数字 id 引用
+  step("TaskUpdate", { taskId: "2", status: "in_progress" }, "u1", "Updated task #2 status");
+  step("TaskUpdate", { taskId: "1", status: "completed" }, "u2", "Updated task #1 status");
+  tracer.finish();
+
+  const todoWrites = sink.events.filter((event) => event.type === "todo/write");
+  // 3 次创建 + 2 次状态变更，每次变更都写全量快照
+  assert.equal(todoWrites.length, 5);
+  assert.deepEqual(todoWrites.at(-1).data, { todos: [
+    { content: "alpha", status: "completed" },
+    { content: "beta", status: "in_progress" },
+    { content: "gamma", status: "pending" },
+  ] });
+  // 快照必须落在它对应的 tool/call 之后、step/end 之前（回合内任何时刻面板都读到最新表）
+  const types = sink.types();
+  assert.ok(types.lastIndexOf("todo/write") < types.lastIndexOf("step/end"));
+});
+
+test("TodoWrite 入参缺 todos 数组时不写 todo/write（不落垃圾事件）", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  tracer.handleMessage({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "tw1", name: "TodoWrite", input: {} }] },
+  });
+  tracer.handleMessage({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "tw1", content: "ok" }] },
+  });
+  tracer.finish();
+
+  assert.equal(sink.types().includes("todo/write"), false);
+  assert.equal(sink.types().includes("tool/call"), true, "tool/call 卡片照常写");
+});

@@ -100,6 +100,23 @@ DSH 前端按 wire 工具名分类渲染；未命中的名字会落进通用卡�
 | `TodoWrite` | `todo_write` |
 | `Agent` / `Task` | `subagent` |
 
+## 任务列表回放（todo/write）
+
+DSH 的任务列表面板读会话日志里的 `todo/write` 事件（`@deepseek-ai/dsh-tool-todo` 注册的
+session projection：整表替换、last-write-wins、`turn/start` 重置）。这些任务工具在 CLI
+本地执行、不经过 DSH 工具层，所以 tracer 在流结算处把每次原生任务操作回放进一张任务表
+（`lib/tasks.mjs`，每个 turn 一个实例），并把变更后的**全量快照**写成 `todo/write` 事件：
+
+- `TodoWrite`：整表替换（入参 `todos` 归一化：trim、丢空内容 / 非法状态 / 重复项；不做
+  「至多一个 in_progress」校验，Claude 允许并行任务，面板如实渲染）。
+- `TaskCreate`：追加 pending 项。入参没有 id，真实 id 在回执文本里
+  （实测 `"Task #N created successfully: …"`）→ 先用占位 id，回执到达时绑定。
+- `TaskUpdate`：按数字 `taskId` 补丁状态 / subject。它的 `tool_use` 可能先于 `TaskCreate`
+  的回执到达（实测）→ 引用未绑定 id 的补丁先排队，绑定后自动清算。
+
+回执在 step 关闭后才到（如回合被取消）时占位项绑定不上，补丁随 turn 丢弃 —— 面板在
+`turn/start` 也会重置，两侧生命周期一致。
+
 # 子代理追踪
 
 以主轨迹里的 `Agent` / `Task` `tool_use` 块为**权威信号**：每个子代理用它的 `tool_use` id
