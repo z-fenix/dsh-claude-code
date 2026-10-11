@@ -86,7 +86,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - **路由靠接管 agent factory 槽位**。`ctx.agents.setFactory()` 在已有工厂时会抛错，而后加载的插件必然晚于 `dsh-base` 的 agent-loop 行；槽位是普通字段（`{ target: factory }`），插件替换它、并在自己的 fiber 释放时换回原工厂。**拿不到工厂时抛错**（而不是 warn 后静默返回）：静默降级的后果是预设列表里出现一个没有任何主循环接管的 Claude Code 预设，用户只能看到「模型自称 Claude Code 却没有工具」，无从归因。
 - **只有本插件引擎的会话被接管，其余整条委托回原工厂**。新建会话按 `meta.agentPreset` 路由，resume 先读持久化日志反推预设（空白期切过预设的会话必须按日志而不是 header 判断）；只要解析结果不是本插件引擎，`createAgent`/`resume` 都直接转交 `@deepseek-ai/dsh-agent-loop`。
   为什么不让原生会话也走自己的实现：AgentLoop 的建会话链路包含 `ownership.trackWrapper` → `setupAndPublish`（`raceAbort(options.setup)` + `interruptedTurnClosers` + `appendUnstoredSuffix`）→ `raceAbortCall` → owner/ownership 融合信号与失败回滚，每一步都参与它的生命周期记账。复刻其中一段会把原生会话换成残缺实现——实测表现为**会话文件建好、header 写入，之后再无任何事件，既打不开也发不出消息**，而 Claude Code 会话因为走另一条路径反而正常。
-  代价：原生会话不再登记 record/handle，因此**不能**在空白会话内原地切到本插件引擎（会被显式拒绝并提示新建会话）；本插件会话之间互相切换仍然支持。
+  代价：原生会话不再登记 record/handle，因此**不能**在空白会话内原地切到本插件引擎——宿主（dsh-agent-preset-registry）的预设切换是「原地重挂组合」，会把 Claude Code 预设挂到原生 Agent 上并向 UI 报告成功，但真正的引擎接管要等下次 resume（重启 / 重新打开会话）时按持久化日志判定；本插件会话切回 standard 则会**当场**用原工厂的 prepare() 换回原生循环，无需重建会话。
 - **轨迹映射**：`request/header`（模型 + 工具表，供上下文构成投影）→ 每个 Claude assistant 消息一个 `step`（`step/start` → `assistant/message`（含 `stream` 与 `usage`）→ `tool/call` → `tool/result` → `step/end`）→ `request/context`（上下文窗口）。
 - **休眠 LLM 路由**：`claude-code` 注册进 `ctx.llm` 但从不转发请求，只为让前端模型选择认为该 provider「已被服务」——否则首轮之后输入框会自锁。
 

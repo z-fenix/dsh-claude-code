@@ -257,6 +257,135 @@ test("持久化读取失败时不卡住登记表，后续 resume 仍会真的重
   assert.equal(router.resumes.has("s-fail"), false);
 });
 
+// ── 空白 Claude Code 会话切回 standard：必须真正换回原生循环 ─────────────────
+//
+// 宿主（dsh-agent-preset-registry）的预设切换是「原地重挂组合、不重建 Agent」：
+// select() recompose 完就追加 agent-preset/selected 并向 UI 返回成功。若本路由只是
+// 拒绝换回原生（旧行为，仅向 stderr 写一条看不见的 warn），会话芯片已显示 standard、
+// 实际仍由 Claude Code CLI 驱动——用户看到的就是「切换无效」，且重启后 resume 按
+// 日志判定 standard 又突然变回原生循环，状态不一致。
+//
+// 契约：本路由自造的会话（record/handle 都在）收到 agent-preset/selected 且目标解析到
+// 原生循环时，用原工厂的 prepare() 真正换上原生 Agent：拆旧引擎 Agent（不动会话）、
+// 会话所有权原样移交、挂载目标预设、只注册新 Agent（不重发 session/created）。
+// 换回原生后本路由不再介入该会话（原生 prepared 的 ownership 无法安全拿回）。
+test("空白 claude-code 会话切到 standard：拆旧引擎、用原工厂 prepare 换上原生 Agent", async () => {
+  const calls = {
+    cancel: 0, dispose: 0, nativePrepare: [], mount: [],
+    agentsEnter: 0, agentsAnnounce: 0, sessionsEnter: [], sessionsAnnounce: [],
+  };
+  const session = { id: "s-swap", header: { agentPreset: "claude-code" } };
+  const claudeAgent = {
+    id: "s-swap",
+    session,
+    ctx: { tag: "claude-ctx" },
+    async runMaintenance(job) { return job(); },
+    cancel() { calls.cancel += 1; },
+    async whenIdle() {},
+    async dispose() { calls.dispose += 1; },
+  };
+  const nativeAgent = {
+    id: "s-swap",
+    async runMaintenance(job) { return job(); },
+    cancel() {},
+    async whenIdle() {},
+    async dispose() {},
+  };
+  const original = {
+    prepare(ownerCtx, id, agentOptions, preparedSession) {
+      calls.nativePrepare.push({ id, agentOptions, session: preparedSession });
+      return { agent: nativeAgent, signal: new AbortController().signal, dispose: async () => {} };
+    },
+    async createAgent() { throw new Error("not used"); },
+    async resume() { throw new Error("not used"); },
+  };
+
+  let presetHandler;
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {} },
+    on(event, handler) {
+      if (event === "agent-preset/selected") presetHandler = handler;
+    },
+    agents: {
+      enter() { calls.agentsEnter += 1; return () => {}; },
+      async announce() { calls.agentsAnnounce += 1; },
+    },
+    sessions: {
+      get: (id) => (id === "s-swap" ? session : undefined),
+      prepare: (id) => ({ id }),
+      enter(s) { calls.sessionsEnter.push(s.id); return () => {}; },
+      announce(s) { calls.sessionsAnnounce.push(s.id); },
+    },
+    get(name) {
+      if (name === "agentPresets") return { async mount(agentCtx, preset) { calls.mount.push(preset); } };
+      return undefined;
+    },
+  };
+
+  const router = new EngineRouter(ctx, {
+    defaultEngine: DEEPSEEK_ENGINE_ID, engineByPreset: {}, engines: {},
+  }, original, makeRegistryWithAgent(claudeAgent));
+  assert.ok(presetHandler, "路由必须在构造时订阅 agent-preset/selected");
+
+  // 1) 建一个 claude-code 会话（走本路由自造路径）。
+  await router.createAgent({}, {
+    sessionId: "s-swap",
+    agentOptions: { provider: "local", model: "m" },
+    meta: { agentPreset: "claude-code" },
+  });
+  assert.equal(router.handles.get("s-swap")?.engineId, "claude-code");
+  assert.deepEqual(calls.sessionsEnter, ["s-swap"], "建会话时 enter 一次");
+  assert.deepEqual(calls.sessionsAnnounce, ["s-swap"], "建会话时 announce 一次");
+
+  // 2) 空白会话内切到 standard（宿主 recompose 后发事件）。
+  presetHandler("s-swap", "standard");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.ok(calls.cancel >= 1, "旧引擎 Agent 必须被 cancel");
+  assert.ok(calls.dispose >= 1, "旧引擎 Agent 必须被 dispose");
+  assert.equal(calls.nativePrepare.length, 1, "必须用原工厂 prepare() 造原生 Agent");
+  assert.equal(calls.nativePrepare[0].id, "s-swap");
+  assert.deepEqual(calls.nativePrepare[0].agentOptions, { provider: "local", model: "m" });
+  assert.equal(calls.nativePrepare[0].session, session, "必须复用同一个会话对象，不得重建");
+  assert.equal(router.handles.get("s-swap")?.engineId ?? null, null, "新句柄必须是原生引擎");
+  assert.deepEqual(calls.mount, ["standard"], "必须给新原生 Agent 挂载目标预设");
+  assert.equal(calls.agentsEnter, 2, "新原生 Agent 必须注册进 agents store");
+  assert.deepEqual(calls.sessionsEnter, ["s-swap"], "换 Agent 不得重新 enter 会话");
+  assert.deepEqual(calls.sessionsAnnounce, ["s-swap"], "换 Agent 不得重发 session/created");
+
+  // 3) 换回原生后再切 claude-code：本路由必须不再介入（原生 ownership 拿不回来）。
+  presetHandler("s-swap", "claude-code");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls.nativePrepare.length, 1, "原生会话不得再次被本路由换引擎");
+  assert.equal(calls.dispose, 1, "原生 Agent 不得被本路由拆除");
+});
+
+test("原生会话切到本插件引擎时记录一条说明（重启后 resume 才真正接管）", async () => {
+  const warnings = [];
+  const { original, calls } = spyFactory();
+  let presetHandler;
+  const ctx = {
+    logger: { debug() {}, info() {}, warn(message) { warnings.push(message); } },
+    on(event, handler) {
+      if (event === "agent-preset/selected") presetHandler = handler;
+    },
+    get: () => undefined,
+    sessions: { get: () => undefined },
+  };
+  const router = new EngineRouter(ctx, {
+    defaultEngine: DEEPSEEK_ENGINE_ID, engineByPreset: {}, engines: {},
+  }, original, makeRegistry());
+
+  await router.createAgent({}, { sessionId: "s-native", meta: { agentPreset: "standard" } });
+  presetHandler("s-native", "claude-code");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls.createAgent.length + calls.resume.length, 1, "原生会话仍归原工厂，本路由不得介入");
+  assert.ok(
+    warnings.some((message) => message.includes("s-native") && message.includes("claude-code")),
+    `必须向 logger.warn 写一条含会话 id 与引擎名的说明，实际：${JSON.stringify(warnings)}`,
+  );
+});
+
 // 回归护栏（实测故障，报错逐字为 `cannot get property "systemPrompt" without inject`）：
 //
 // 原生 AgentLoop 在 setupAndPublish 里有一句 `await setup?.(prepared.agent.ctx, prepared.agent)`

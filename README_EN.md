@@ -83,7 +83,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 ## ⚠️ Known limitations
 
 - The preset is a routing key: its DSH tools and persona are **not** forwarded to Claude Code, which brings its own tools and persona.
-- A session locks its preset once it has produced a turn (a DSH rule), so the engine can no longer be switched.
+- A session locks its preset once it has produced a turn (a DSH rule), so the engine can no longer be switched. Within a blank session, switching **away** from Claude Code (to `standard` or any native preset) swaps back to the native loop in place; switching a native session **into** Claude Code takes effect on the next resume (app restart or reopening the session), because the host recomposes presets in place without recreating agents.
 - Claude Code's internal subagents are a **read-only projection**: they appear in the lineage tree as child sessions but carry no DSH agent.
 - Exact resume depends on the plugin's sidecar store (`~/.dsh/dsh-claude-code/sessions.json`).
 
