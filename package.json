@@ -39,7 +39,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\""
+    "test": "node --test --experimental-test-module-mocks \"test/**/*.test.mjs\""
   },
   "keywords": [
     "deepseek-harness",

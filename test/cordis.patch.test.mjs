@@ -142,14 +142,18 @@ test("预设不得重复声明 host plane 已注册的委派工具", () => {
   }
 });
 
+/** 探测宿主 app.asar：DSH_ASAR 环境变量优先，其次已知安装位置；找不到返回 undefined。 */
+function locateHostAsar() {
+  const candidates = [
+    process.env.DSH_ASAR,
+    "C:\\software\\DeepSeek Harness\\resources\\app.asar",
+  ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 /** 从宿主 app.asar 的头部列出运行时自带的包名（只读头部，不加载整个归档）。 */
 function runtimePackageNames(asarPath) {
-  let fd;
-  try {
-    fd = readFileSync(asarPath, { flag: "r" });
-  } catch {
-    return undefined; // 没有宿主安装时跳过这项校验
-  }
+  const fd = readFileSync(asarPath, { flag: "r" });
   const headerPickleSize = fd.readUInt32LE(4);
   const headerJsonSize = fd.readUInt32LE(12);
   const header = JSON.parse(fd.subarray(16, 16 + headerJsonSize).toString("utf8"));
@@ -159,7 +163,7 @@ function runtimePackageNames(asarPath) {
   return names;
 }
 
-test("preset 的每一行都有 id 与 name，且模块名可被解析", () => {
+test("preset 的每一行都有 id 与 name，且模块名可被解析", (t) => {
   const row = insertedRows(patch).find((candidate) => candidate.name === "@deepseek-ai/dsh-agent-preset");
   /** 递归收集所有插件行的模块名。 */
   const collect = (list, out = []) => {
@@ -172,7 +176,14 @@ test("preset 的每一行都有 id 与 name，且模块名可被解析", () => {
   const moduleNames = collect(row.config.plugins).filter((name) => name !== "cordis:group");
   assert.ok(moduleNames.length > 0);
 
-  const host = process.env.DSH_ASAR ?? "C:\\software\\DeepSeek Harness\\resources\\app.asar";
+  // 宿主 asar 的位置因机器而异（本仓库作者与用户没有共同的默认安装盘符），所以先探测：
+  // DSH_ASAR 环境变量优先，其次已知安装位置。找不到宿主时跳过整个校验——预设引用的包
+  // 允许只存在于宿主运行时，没有运行时清单就无法证明「不存在」，报错只会是假阳性。
+  const host = locateHostAsar();
+  if (host === undefined) {
+    t.skip("未找到宿主 app.asar（可用 DSH_ASAR 环境变量指向宿主的 resources/app.asar），跳过包名解析校验");
+    return;
+  }
   const runtime = runtimePackageNames(host);
 
   for (const name of moduleNames) {
@@ -181,7 +192,7 @@ test("preset 的每一行都有 id 与 name，且模块名可被解析", () => {
     const pkg = name.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
     const local = fileURLToPath(new URL(`../node_modules/${pkg}/package.json`, import.meta.url));
     const inWorkspace = existsSync(local);
-    const inRuntime = runtime?.has(pkg) ?? false;
+    const inRuntime = runtime.has(pkg);
     assert.ok(
       inWorkspace || inRuntime,
       `预设引用了不存在的包：${name}（workspace 与宿主运行时都没有）`,

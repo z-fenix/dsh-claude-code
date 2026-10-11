@@ -46,7 +46,21 @@ step/end
 
 `tool/result` 会带 `sourceEventSeqs: [toolCallSeq]` 指回它的 `tool/call`。
 
-# 两个关键约束
+# 关键约束
+
+**turn/end 之前必须 serial 派发 `agent/turn-stopping`。** 原生 dsh-agent-loop 在 append
+`turn/end` 之前先 serial 派发该事件，宿主侧的轮内监听器（如 `dsh-workspace-changes`
+记录器）等它完成才放行。本插件在 `lib/agent.mjs` 的 drive() 里遵守同一契约；漏掉它时
+`workspace/changes` 会落在 `turn/end` 之后，客户端的改动文件卡片要等下一轮 `turn/start`
+重建视图才渲染——表现为「每轮结束后的文件变更延迟到下一次发消息才显示」。`logIntact === false`
+的回合不派发（回合不闭合，与原生错误路径一致，由记录器的 turn/end 兜底覆盖；本插件此处
+连 turn/end 都不写，下一轮 start 丢弃状态）。
+
+**改动文件卡片的覆盖边界（插件会话）。** `dsh-workspace-changes` 记录器有两条采集途径：
+`tools/pre-execute` 里「编辑前整文件捕获」，以及轮内快照对比。Claude Code 的文件编辑发生在
+CLI 进程内，不经过 DSH 的 `tools/pre-execute`，所以前一条路对插件会话**永远不触发**。工作区
+在 git 仓库内时，快照对比仍能完整覆盖；工作区不在任何 git 仓库内时，插件会话的改动文件
+卡片将基本为空（shell 改动同样不计）。这是宿主记录器的规则，本插件无法绕过，属已知边界。
 
 **用量必须与消息同一条事件落盘。** `dsh-token-meter` 的 `usageOf()` 只读
 `assistant/message.data.usage`，或它内嵌 `stream` 里最后一个 `usage` 分片。而 Claude 的用量
