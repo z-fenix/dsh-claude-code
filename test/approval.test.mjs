@@ -134,3 +134,15 @@ test("非 bypass 策略下同样把 canUseTool 交给 SDK", async () => {
   assert.equal(typeof capturedOptions[0].canUseTool, "function");
   assert.equal(capturedOptions[0].permissionMode, undefined);
 });
+
+test("goal 桥接工具在 no-prompt（never）下仍放行，且早于策略短路", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "workspace-write" }), ev("approval/policy", { policy: "never" })]),
+    agent: { id: "a1" },
+  });
+  assert.deepEqual(await canUseTool("mcp__goal__get_goal", {}), { behavior: "allow" });
+  assert.deepEqual(await canUseTool("mcp__goal__update_goal", { action: "complete" }), { behavior: "allow" });
+  // 非 goal 的 MCP 工具不受此放行影响
+  assert.equal((await canUseTool("mcp__other__x", {})).behavior, "deny");
+});
