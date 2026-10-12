@@ -6,3 +6,6 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.swp
+
+# SDD 执行工作区（进度账本/简报/复核包），不进版本库
+.superpowers/
