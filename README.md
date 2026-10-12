@@ -120,7 +120,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 ```sh
 pnpm install
-pnpm test        # 156 个用例：待办队列 / 权限映射 / 轨迹映射 / 路由判定 / patch 校验 / apply 接线
+pnpm test        # 157 个用例：待办队列 / 权限映射 / 轨迹映射 / 路由判定 / patch 校验 / apply 接线 / goal 桥接
 ```
 
 ## 📄 许可证
