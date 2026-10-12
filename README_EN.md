@@ -23,6 +23,7 @@
 - **⏯️ Exact resume** — the Claude session id is persisted on the side, so a resumed chat continues the *same* Claude session.
 - **🌐 Subagents stay DeepSeek** — whatever the top-level session runs on, subagents use the native loop.
 - **🧩 Extensible** — the engine registry is exposed as `ctx.claudeCodeEngines`, so other plugins can register engines and reuse the same preset→engine routing and blank-session swap.
+- **🎯 Goal-driven automatic tasks** — a session on the Claude Code preset supports the same goal mode as the standard preset: type `/goal <objective>` and it advances round after round, with Claude reading the bridged `get_goal`/`update_goal` and closing the objective out (complete/blocked). Toggle with `engines.claude-code.goal.enabled`, on by default.
 
 ## 🚀 Install
 
@@ -62,6 +63,10 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
         persistSession: true
         includePartialMessages: true
         traceSubagents: true
+        goal:
+          enabled: true                    # on by default: bridges the goal tools into Claude Code
+          blockedAfterConsecutiveRounds: 3 # consecutive rounds on one blocker before `blocked` is allowed
+          # defaultMaxGoalRounds: 256      # optional: fallback when the model omits max_goal_rounds
         env: {}
         contextWindow: 200000
 ```
@@ -79,6 +84,9 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 | `engines.claude-code.traceSubagents` | `true` | Map Claude's internal subagents to read-only DSH child sessions |
 | `engines.claude-code.env` | `{}` | Extra environment for the claude subprocess |
 | `engines.claude-code.contextWindow` | unset | Manual context window (tokens) fallback |
+| `engines.claude-code.goal.enabled` | `true` | Whether to bridge `get_goal`/`create_goal`/`update_goal` into Claude Code (the session can auto-advance with `/goal`) |
+| `engines.claude-code.goal.blockedAfterConsecutiveRounds` | `3` | How many consecutive goal rounds on the same blocker are needed before the model may mark it `blocked` |
+| `engines.claude-code.goal.defaultMaxGoalRounds` | unset | Fallback round cap when the model calls `create_goal` without one (defaults to DSH's 256) |
 
 ## ⚠️ Known limitations
 
@@ -86,6 +94,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 - A session locks its preset once it has produced a turn (a DSH rule), so the engine can no longer be switched. Within a blank session, switching **away** from Claude Code (to `standard` or any native preset) swaps back to the native loop in place; switching a native session **into** Claude Code takes effect on the next resume (app restart or reopening the session), because the host recomposes presets in place without recreating agents.
 - Claude Code's internal subagents are a **read-only projection**: they appear in the lineage tree as child sessions but carry no DSH agent.
 - Exact resume depends on the plugin's sidecar store (`~/.dsh/dsh-claude-code/sessions.json`).
+- **Goal continuation depends on the goal stack in the DSH host plane** (`dsh-goal` + `dsh-goal-round-driver`). On deployments without that stack `goal.enabled` silently does nothing (no tools bridged, no prompt added), and `/goal` falls back to DSH's native behavior (there is no `/goal` command at all if that preset doesn't mount `command-goal`).
 
 ## 🧪 Development
 

@@ -23,6 +23,7 @@
 - **⏯️ 精确续接**：Claude 会话 id 旁路持久化，重启后续聊接回**同一个** Claude 会话。
 - **🌐 子代理照旧 DeepSeek**：不管主会话选了谁，子代理都走原生循环。
 - **🧩 可扩展**：引擎注册表暴露为 `ctx.claudeCodeEngines`，别的插件可以注册自己的引擎，复用同一套「预设 → 引擎」路由与空白会话内切换。
+- **🎯 目标式自动任务**：选中 Claude Code 预设的会话支持标准模式那套 goal —— 输入 `/goal <目标>` 后自动一轮轮推进，Claude 用桥接的 `get_goal`/`update_goal` 读取并把目标收尾（complete/blocked）。开关 `engines.claude-code.goal.enabled`，默认开。
 
 ## 🚀 安装
 
@@ -62,6 +63,10 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
         persistSession: true
         includePartialMessages: true
         traceSubagents: true
+        goal:
+          enabled: true                    # 默认开：把 goal 工具桥接进 Claude Code
+          blockedAfterConsecutiveRounds: 3 # 同一阻塞条件连续多少轮才允许标记 blocked
+          # defaultMaxGoalRounds: 256      # 可选：模型未给 max_goal_rounds 时的兜底
         env: {}                          # 例如 { ANTHROPIC_API_KEY: sk-... }
         contextWindow: 200000            # 可选：SDK 取不到时兜底
 ```
@@ -79,6 +84,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | `engines.claude-code.traceSubagents` | `true` | Claude 内部子代理映射成独立只读子会话 |
 | `engines.claude-code.env` | `{}` | 追加给 claude 子进程的环境变量 |
 | `engines.claude-code.contextWindow` | 未配置 | 手动指定上下文窗口（token 数） |
+| `engines.claude-code.goal.enabled` | `true` | 是否把 `get_goal`/`create_goal`/`update_goal` 桥接进 Claude Code（会话可用 `/goal` 自动推进） |
+| `engines.claude-code.goal.blockedAfterConsecutiveRounds` | `3` | 同一阻塞条件连续达到多少个 goal round 才允许模型标记 `blocked` |
+| `engines.claude-code.goal.defaultMaxGoalRounds` | 未配置 | 模型调 `create_goal` 未给上限时的兜底轮数（默认走 DSH 的 256） |
 
 ## 🔍 原理（可选阅读）
 
@@ -106,6 +114,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - 会话一旦发出第一条消息就锁定预设（DSH 的规则），不能再切引擎。
 - Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂 DSH Agent、不可续跑。
 - 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时退化为重放。
+- **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
 
 ## 🧪 开发
 
