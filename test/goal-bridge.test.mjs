@@ -95,3 +95,39 @@ test("get_goal：goals.get 抛异常 → isError，不外抛", async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /boom/);
 });
+
+// ---------------------------------------------------------------------------
+// create_goal
+// ---------------------------------------------------------------------------
+test("create_goal：无人类直接回合 → 拒绝（isError）", async () => {
+  const goals = { create: () => { throw new Error("should not be called"); } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: false }), config: {} });
+  const result = await toolOf(server, "create_goal").handler({ objective: "x" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /direct human/);
+});
+
+test("create_goal：人类回合 → 调 goals.create，透传 objective", async () => {
+  const calls = [];
+  const goals = { create: (agent, request) => { calls.push([agent, request]); return { id: "g1", revision: 1, objective: request.objective, phase: "active", roundsStarted: 0, maxGoalRounds: 256, activation: "armed" }; } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: {} });
+  const value = JSON.parse((await toolOf(server, "create_goal").handler({ objective: "ship it" })).content[0].text);
+  assert.deepEqual(calls[0][1], { objective: "ship it" });
+  assert.equal(value.goal.id, "g1");
+});
+
+test("create_goal：未给 max_goal_rounds 时用配置的 defaultMaxGoalRounds 兜底", async () => {
+  const calls = [];
+  const goals = { create: (_a, request) => { calls.push(request); return { id: "g1", revision: 1, objective: request.objective, phase: "active", roundsStarted: 0, maxGoalRounds: request.maxGoalRounds, activation: "armed" }; } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: { defaultMaxGoalRounds: 12 } });
+  await toolOf(server, "create_goal").handler({ objective: "x" });
+  assert.deepEqual(calls[0], { objective: "x", maxGoalRounds: 12 });
+});
+
+test("create_goal：显式 max_goal_rounds 覆盖默认", async () => {
+  const calls = [];
+  const goals = { create: (_a, request) => { calls.push(request); return { id: "g1", revision: 1, objective: request.objective, phase: "active", roundsStarted: 0, maxGoalRounds: request.maxGoalRounds, activation: "armed" }; } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: { defaultMaxGoalRounds: 12 } });
+  await toolOf(server, "create_goal").handler({ objective: "x", max_goal_rounds: 3 });
+  assert.deepEqual(calls[0], { objective: "x", maxGoalRounds: 3 });
+});
