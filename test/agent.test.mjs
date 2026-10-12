@@ -27,7 +27,7 @@ mock.module("../lib/claude-run.mjs", {
     SUBAGENT_TOOL_NAMES: realClaudeRun.SUBAGENT_TOOL_NAMES,
     PROVIDER: realClaudeRun.PROVIDER,
     runClaudeCode: async (options) => {
-      runCalls.push(options);
+      runCalls.push({ ...options, turnContextSnapshot: typeof options.turnContext === "function" ? options.turnContext() : undefined });
       return { ...runResult };
     },
   },
@@ -75,14 +75,13 @@ function fakeDispatch(timeline) {
   };
 }
 
-/** 驱动一个完整回合；返回 { session, timeline }。 */
-async function driveOneTurn() {
+/** 驱动一个完整回合；返回 { session, timeline, agent }。 */
+async function driveOneTurn(message = { role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hi" }] }) {
   const timeline = [];
   const session = fakeSession(timeline);
   const ctx = new Context();
   ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
   const agent = new ClaudeCodeAgent(ctx, "agent-1", {}, session, { traceSubagents: false });
-  const message = { role: "user", content: [{ type: "text", text: "hi" }] };
   agent.dispatch = fakeDispatch(timeline);
   agent.inbox = {
     nextTurn: [message],
@@ -122,4 +121,20 @@ test("logIntact=false 时回合不补 turn/end，也不派发 turn-stopping", as
   } finally {
     runResult = { output: [{ type: "text", text: "ok" }], stopReason: "completed", claudeSessionId: "claude-1", logIntact: true };
   }
+});
+
+test("currentTurnContext：人类消息回合 → hasHumanMessage 为真、无 goalSource；回合后清空", async () => {
+  const { agent } = await driveOneTurn({ role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hi" }] });
+  const snapshot = runCalls.at(-1).turnContextSnapshot;
+  assert.deepEqual(snapshot, { hasHumanMessage: true, goalSource: undefined });
+  assert.deepEqual(agent.currentTurnContext(), { hasHumanMessage: false, goalSource: undefined }, "回合结束后必须清空");
+});
+
+test("currentTurnContext：goal round → 捕获 goalSource、hasHumanMessage 为假", async () => {
+  const source = { kind: "goal", goalId: "g1", revision: 1, round: 1 };
+  const { agent } = await driveOneTurn({ role: "user", source, content: [{ type: "text", text: "<goal_round>…" }] });
+  const snapshot = runCalls.at(-1).turnContextSnapshot;
+  assert.equal(snapshot.hasHumanMessage, false);
+  assert.deepEqual(snapshot.goalSource, source);
+  assert.deepEqual(agent.currentTurnContext(), { hasHumanMessage: false, goalSource: undefined });
 });
