@@ -48,3 +48,50 @@ test("goalGuidance：把阈值插进策略文本", () => {
 test("GOAL_TOOL_PREFIX：canUseTool 放行前缀与 server 名一致", () => {
   assert.equal(GOAL_TOOL_PREFIX, "mcp__goal__");
 });
+
+// ---------------------------------------------------------------------------
+// buildGoalServer + get_goal
+// ---------------------------------------------------------------------------
+const { buildGoalServer } = await import("../lib/goal-bridge.mjs");
+
+/** 一个记录调用的假 ctx：goals 服务 + 最小 agents 注册表。 */
+function fakeCtx(goals, agent) {
+  return {
+    get: (key) => (key === "goals" ? goals : undefined),
+    agents: {
+      get: (id) => (id === agent.id ? agent : undefined),
+      currentInitiator: () => agent,
+    },
+  };
+}
+const runningAgent = { id: "a1", status: "running" };
+const toolOf = (server, name) => server.tools.find((t) => t.name === name);
+
+test("无 goals 服务 → buildGoalServer 返回 undefined（功能静默缺席）", () => {
+  const ctx = { get: () => undefined, agents: {} };
+  assert.equal(buildGoalServer({ ctx, agent: runningAgent, turnContext: () => ({}), config: {} }), undefined);
+});
+
+test("get_goal：无当前 goal → { goal: null }", async () => {
+  const goals = { get: () => undefined };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: false }), config: {} });
+  const result = await toolOf(server, "get_goal").handler({});
+  assert.deepEqual(JSON.parse(result.content[0].text), { goal: null });
+});
+
+test("get_goal：有 goal → 返回投影与 activation", async () => {
+  const goal = { id: "g1", revision: 1, objective: "x", phase: "active", roundsStarted: 0, maxGoalRounds: 8, activation: "armed" };
+  const goals = { get: () => goal };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({}), config: {} });
+  const value = JSON.parse((await toolOf(server, "get_goal").handler({})).content[0].text);
+  assert.equal(value.goal.id, "g1");
+  assert.equal(value.activation, "armed");
+});
+
+test("get_goal：goals.get 抛异常 → isError，不外抛", async () => {
+  const goals = { get: () => { throw new Error("boom"); } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({}), config: {} });
+  const result = await toolOf(server, "get_goal").handler({});
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /boom/);
+});
