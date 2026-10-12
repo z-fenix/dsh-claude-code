@@ -92,7 +92,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 
 - The preset is a routing key: its DSH tools and persona are **not** forwarded to Claude Code, which brings its own tools and persona.
 - A session locks its preset once it has produced a turn (a DSH rule), so the engine can no longer be switched. Within a blank session, switching **away** from Claude Code (to `standard` or any native preset) swaps back to the native loop in place; switching a native session **into** Claude Code takes effect on the next resume (app restart or reopening the session), because the host recomposes presets in place without recreating agents.
-- Claude Code's internal subagents are a **read-only projection**: they appear in the lineage tree as child sessions but carry no DSH agent.
+- Claude Code's internal subagents are a **read-only projection**: they appear in the lineage tree as child sessions and carry no loop and no continuation. To make the panel report the right run state, each child also registers a **passive status-carrier agent** (no model loop, no input); the panel's running/completed/not-running labels come from the host agent registry alone.
 - Exact resume depends on the plugin's sidecar store (`~/.dsh/dsh-claude-code/sessions.json`).
 - **Goal continuation depends on the goal stack in the DSH host plane** (`dsh-goal` + `dsh-goal-round-driver`). On deployments without that stack `goal.enabled` silently does nothing (no tools bridged, no prompt added), and `/goal` falls back to DSH's native behavior (there is no `/goal` command at all if that preset doesn't mount `command-goal`).
 

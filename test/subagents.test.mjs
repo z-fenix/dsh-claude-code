@@ -1,7 +1,44 @@
 // test/subagents.test.mjs — 子代理（Agent / Task 工具）→ DSH 子会话的生命周期映射。
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Context } from "@deepseek-ai/cordis";
 import { SubagentSessionManager } from "../lib/subagents.mjs";
+
+/**
+ * 假 agents 服务：agent 注册表在本用例里只需要最小面——`enter/announce` 登记、`get`
+ * 反查、detach 注销。载体（lib/child-agent.mjs）的状态上报走宿主 ctx 的事件派发
+ * （`agentEvents` → `ctx.events.dispatch`），由 fakeHost 上的真实监听器记账。
+ */
+function fakeAgents(parentAgent) {
+  const store = new Map([[parentAgent.id, parentAgent]]);
+  const service = {
+    /** enter 记录：{ id, owner }（owner 为 undefined = root）。 */
+    entered: [],
+    announced: [],
+    detached: [],
+    /** 宿主监听器收到的状态序列：`<id>:<status>`。 */
+    statuses: [],
+    /** 模拟第三方 `agent/created` 监听器抛错（serial 派发会据此让 announce 整体失败）。 */
+    announceThrows: false,
+    /** 模拟注册表直接拒绝登记（enter 就失败）。 */
+    enterThrows: false,
+    get: (id) => store.get(id),
+    enter(agent, owner) {
+      if (service.enterThrows) throw new Error("carrier agent rejected by the registry");
+      store.set(agent.id, agent);
+      service.entered.push({ id: agent.id, owner: owner?.id });
+      return () => {
+        store.delete(agent.id);
+        service.detached.push(agent.id);
+      };
+    },
+    async announce(agent, source) {
+      if (service.announceThrows) throw new Error("third-party agent/created listener blew up");
+      service.announced.push({ id: agent.id, source });
+    },
+  };
+  return service;
+}
 
 /**
  * 假 sessions 服务 + 假 sessionPersistence，联合模拟宿主的两条真实契约：
@@ -9,8 +46,12 @@ import { SubagentSessionManager } from "../lib/subagents.mjs";
  *   ② 持久化后端按 `writers.get(session.id)` 路由 `session/event`，没有 write handle 的会话
  *      一个事件都写不出去（见 @deepseek-ai/dsh-session-persistence-jsonl 的 install()）。
  * 于是「事件是否完整进日志」在测试里是可断言的结果，而不是内部实现细节。
+ *
+ * ctx 用**真 cordis Context**（与 test/agent.test.mjs 同款）：载体要建真作用域
+ * （`createScope`）、经真事件派发上报状态，这两条只有真 ctx 才跑得通——也才能让「根 ctx 上的
+ * 监听器能收到子作用域派发的 agent/status」这条生产契约在单测里被覆盖。
  */
-function fakeHost({ deferCreate = false } = {}) {
+function fakeHost({ deferCreate = false, withPersistence = true, withAgents = true, announceThrows = false, enterThrows = false } = {}) {
   const writers = new Map();
   const created = [];
   const calls = [];
@@ -91,15 +132,23 @@ function fakeHost({ deferCreate = false } = {}) {
     },
   };
 
-  const ctx = {
-    get: (name) => {
-      if (name === "sessions") return sessions;
-      if (name === "sessionPersistence") return persistence;
-      return undefined;
-    },
-    effect: () => () => {},
-  };
-  return { ctx, sessions, persistence, parentSession };
+  const warnings = [];
+  // 父 agent 已在注册表里（生产里主 agent 由宿主工厂登记）：载体的 owner 就是它。
+  const parentAgent = { id: parentSession.id, session: parentSession, status: "running" };
+  const agents = fakeAgents(parentAgent);
+  agents.announceThrows = announceThrows;
+  agents.enterThrows = enterThrows;
+
+  const ctx = new Context();
+  ctx.provide("sessions", sessions);
+  if (withPersistence) ctx.provide("sessionPersistence", persistence);
+  if (withAgents) ctx.provide("agents", agents);
+  ctx.logger = { warn: (message) => warnings.push(message), info: () => {} };
+  // 宿主侧监听器（生产里是 dsh-api-session-controller）：收到 agent/status 才可能把会话
+  // 标成 running——lineage 面板的「正在运行」就来自这一条。
+  ctx.on("agent/status", ({ agent, status }) => { agents.statuses.push(`${agent.id}:${status}`); });
+
+  return { ctx, sessions, persistence, agents, parentSession, parentAgent, warnings };
 }
 
 function makeManager(options) {
@@ -328,8 +377,7 @@ test("写所有权还没到手就收尾，事件也不能丢", async () => {
 });
 
 test("没有持久化后端时降级：照旧建会话、照旧写 catalog", async () => {
-  const host = fakeHost();
-  host.ctx.get = (name) => (name === "sessions" ? host.sessions : undefined);
+  const host = fakeHost({ withPersistence: false });
   const manager = new SubagentSessionManager(host.ctx, { mainSession: host.parentSession, cwd: "C:\\work" });
   manager.handleMessage(spawnMessage("call_no_pers", { description: "nop" }));
   await settle();
@@ -359,4 +407,136 @@ test("发布失败只记日志，不让 ready 变成未处理 rejection", async 
 
   assert.deepEqual(rejections, [], "不得产生未处理的 rejection");
   assert.equal(warnings.some((m) => m.includes("could not be published")), true, "失败必须留下日志");
+});
+
+// 回归护栏（实测故障：正在跑的子代理在 lineage 面板里显示「一次性 · 当前未运行」，灰点，
+// 表头也不出现「正在运行」计数）。
+//
+// 面板的运行状态**只**来自宿主对子会话的 running 判定，而 running 只可能由「该会话在
+// ctx.agents 注册表里有一个 status==='running' 的 Agent」产生
+// （dsh-api-session-controller 的 summaryFor 读 agents.get(id).status；api-session/status
+// 只由 agent/status 派发）。插件此前只把子会话塞进 sessions store、不挂 Agent（README 的
+// 「只读投影」），于是正在执行的子代理永远没有 running 可言。
+// 修法：给每个子会话登记一个只做状态载体的被动 Agent（不驱动模型、不可续跑），
+// 建会话即报 running，收尾报 idle 并注销。
+test("状态载体：建会话即上报 running（owner 是父 agent），收尾上报 idle 并注销", async () => {
+  const { manager, host, child } = makeManager();
+  const toolUseId = "call_00_carrier";
+
+  manager.handleMessage(spawnMessage(toolUseId, { description: "carry", prompt: "p" }));
+  await settle();
+
+  const kid = child();
+  assert.deepEqual(host.agents.entered, [{ id: kid.id, owner: "session-main" }],
+    "载体必须以**子会话 id** 登记，且 owner 是父 agent（与原生子代理同为「父所有」，不是 root）");
+  assert.deepEqual(host.agents.announced.map((entry) => entry.id), [kid.id], "登记后要 await announce 走完 agent/created");
+  assert.deepEqual(host.agents.statuses, [`${kid.id}:running`], "登记后必须上报 running —— 面板的「正在运行」就靠它");
+  assert.equal(host.agents.get(kid.id)?.status, "running");
+
+  // 收尾：turn/end 之后必须把载体注销，否则会话永远停在「运行中」
+  manager.handleMessage({
+    type: "system", subtype: "task_notification", tool_use_id: toolUseId, status: "completed", summary: "done",
+  });
+  await settle();
+
+  assert.deepEqual(host.agents.statuses, [`${kid.id}:running`, `${kid.id}:idle`], "收尾必须先上报 idle 再注销");
+  assert.deepEqual(host.agents.detached, [kid.id], "收尾必须 detach 载体");
+  assert.equal(host.agents.get(kid.id), undefined);
+  assert.equal(kid.appended.at(-1).type, "turn/end", "载体注销不得打乱子会话的收尾事件");
+});
+
+test("状态载体：前台子代理收尾（父 tool_result）同样注销", async () => {
+  const { manager, host, child } = makeManager({});
+  const toolUseId = "call_fg_carrier";
+  manager.handleMessage(spawnMessage(toolUseId, { description: "fg", prompt: "p" }));
+  // 真实的消费循环是 `for await`：每条 SDK 消息各占一个任务，发布链（写所有权 → 载体登记）
+  // 总在子代理真正跑起来之前走完。这里显式 settle 一次，对齐这个边界。
+  await settle();
+  manager.handleMessage({
+    type: "assistant",
+    parent_tool_use_id: toolUseId,
+    message: { role: "assistant", content: [{ type: "text", text: "前台产出" }] },
+  });
+  manager.handleMessage(toolResultMessage(toolUseId, "前台最终答复"));
+  await settle();
+
+  const kid = child();
+  assert.deepEqual(host.agents.statuses, [`${kid.id}:running`, `${kid.id}:idle`]);
+  assert.deepEqual(host.agents.detached, [kid.id]);
+});
+
+// 载体登记是**辅助信号**：登记失败只记日志，子会话本身、catalog、落盘都不得受影响。
+//
+// 两种失败各有各的处置（与 router.mjs 的 publishResilient 同一判据）：
+//   - `enter` 失败 = 什么都没进注册表 → 收干净走人，面板维持「当前未运行」（与修复前一致）；
+//   - `announce` 失败 = 已进注册表、只少了一次 `agent/created` 通知（serial 派发里任一第三方
+//     监听器抛错都会这样）→ **保留 entry**：宿主的 running 判定读的是注册表里的 agent
+//     （summaryFor 的 agents.get），不是那次通知。
+test("载体 enter 失败只记日志：子会话、catalog、落盘都不受影响", async () => {
+  const { manager, host, child } = makeManager({ enterThrows: true });
+  const toolUseId = "call_00_carrier_boom";
+  manager.handleMessage(spawnMessage(toolUseId, { description: "boom", prompt: "p" }));
+  manager.handleMessage(toolResultMessage(toolUseId, "Async agent launched successfully"));
+  manager.handleMessage({
+    type: "assistant",
+    parent_tool_use_id: toolUseId,
+    message: { role: "assistant", content: [{ type: "text", text: "PONG" }] },
+  });
+  manager.handleMessage({
+    type: "system", subtype: "task_notification", tool_use_id: toolUseId, status: "completed", summary: "PONG",
+  });
+  await settle();
+
+  const kid = child();
+  assert.ok(kid, "子会话照建");
+  assert.deepEqual(childTexts(kid), ["PONG"], "子轨迹照写");
+  assert.equal(host.parentSession.appended.filter((e) => e.type === "subagent/catalog").length, 1, "catalog 照写");
+  assert.equal(host.agents.get(kid.id), undefined, "没进注册表就不该留 entry");
+  assert.deepEqual(host.agents.statuses, [], "没登记成功就不该上报任何状态");
+  assert.equal(host.warnings.some((m) => m.includes("carrier")), true, "失败必须留下日志");
+});
+
+test("载体 announce 被第三方监听器打断时保留 entry：运行状态照报", async () => {
+  const { manager, host, child } = makeManager({ announceThrows: true });
+  const toolUseId = "call_00_notify_fail";
+  manager.handleMessage(spawnMessage(toolUseId, { description: "notify", prompt: "p" }));
+  await settle();
+
+  const kid = child();
+  assert.ok(host.agents.get(kid.id), "已进注册表 → 必须保留（宿主的 running 判定读的就是它）");
+  assert.deepEqual(host.agents.statuses, [`${kid.id}:running`], "通知失败不影响状态上报");
+  assert.equal(host.warnings.some((m) => m.includes("notification failed")), true, "降级必须留下日志");
+
+  manager.handleMessage({
+    type: "system", subtype: "task_notification", tool_use_id: toolUseId, status: "completed", summary: "done",
+  });
+  await settle();
+  assert.deepEqual(host.agents.statuses, [`${kid.id}:running`, `${kid.id}:idle`]);
+  assert.deepEqual(host.agents.detached, [kid.id], "收尾照旧注销");
+});
+
+test("没有 agents 服务时降级：子会话与 catalog 照旧，不报状态", async () => {
+  const { manager, host, child } = makeManager({ withAgents: false });
+  manager.handleMessage(spawnMessage("call_no_agents", { description: "no-agents" }));
+  await settle();
+
+  const kid = child();
+  assert.ok(kid);
+  assert.equal(host.parentSession.appended.filter((e) => e.type === "subagent/catalog").length, 1);
+  assert.deepEqual(host.agents.statuses, []);
+});
+
+test("收尾早于登记（发布链还没走完）时，不闪一次 running，且照旧注销", async () => {
+  const { manager, host, child } = makeManager({ deferCreate: true });
+  const toolUseId = "call_00_rush";
+  manager.handleMessage(spawnMessage(toolUseId, { description: "rush", prompt: "p" }));
+  manager.handleMessage(toolResultMessage(toolUseId, "Async agent launched successfully"));
+  manager.finishRun({});               // create 还没 resolve 就收尾
+  for (const release of host.persistence.pendingCreates) release();
+  await settle();
+
+  const kid = child();
+  assert.deepEqual(host.agents.statuses, [], "从未标成 running 的子代理不该上报状态（面板靠 turn/end 判「已完成」）");
+  assert.deepEqual(host.agents.detached, [kid.id], "登记完成后要立刻注销");
+  assert.equal(host.agents.get(kid.id), undefined);
 });

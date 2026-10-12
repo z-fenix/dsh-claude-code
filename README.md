@@ -112,7 +112,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
   因此本预设**刻意不含** `delegation` 组：`subagent` / `subagent_fork` / `interrupt_agent` / `list_agents` / `send_message` / `workflow` 都由 DSH 的 host plane 提供。`test/cordis.patch.test.mjs` 有一条护栏断言这 8 个 id 不得出现。
 - 预设同时也是**路由键**：只有路由到本插件引擎时，会话才由 Claude Code CLI 驱动；此时 Claude 用自带工具与默认人设，预设里的工具行不影响它（它们服务于原生循环那条路径）。
 - 会话一旦发出第一条消息就锁定预设（DSH 的规则），不能再切引擎。
-- Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂 DSH Agent、不可续跑。
+- Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂主循环、不可续跑。为了让面板显示正确的运行状态，每个子会话另挂一个**只做状态载体的被动 Agent**（不驱动模型、不消费输入；面板的「正在运行／已完成／当前未运行」只认宿主注册表里的 Agent 状态）。
 - 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时退化为重放。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
 
@@ -120,7 +120,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 ```sh
 pnpm install
-pnpm test        # 157 个用例：待办队列 / 权限映射 / 轨迹映射 / 路由判定 / patch 校验 / apply 接线 / goal 桥接
+pnpm test        # 163 个用例：待办队列 / 权限映射 / 轨迹映射 / 子代理生命周期 / 路由判定 / patch 校验 / apply 接线 / goal 桥接
 ```
 
 ## 📄 许可证

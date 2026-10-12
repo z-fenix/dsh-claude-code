@@ -124,6 +124,16 @@ session projection：整表替换、last-write-wins、`turn/start` 重置）。�
 （`origin: "subagent"` + `parentSession` + `delegationDepth` + `subagent/descriptor`），
 只读、不可续跑，完成后 flush 再 detach（仍可读轨迹）。
 
+每个子会话还会登记一个**只做状态载体的被动 Agent**（`lib/child-agent.mjs`，不驱动任何回合、
+不接受输入）。原因：lineage 面板每行的运行状态只来自宿主对子会话的 running 判定，而 running
+只可能由「该会话在 `ctx.agents` 注册表里有一个 `status === "running"` 的 Agent」产生
+（`dsh-api-session-controller` 的 `summaryFor` 读 `agents.get(id)?.status`，`api-session/status`
+只由 `agent/status` 派发）。不登记的话，正在执行的子代理会被渲染成「一次性 · 当前未运行」，
+表头也不出现运行中计数。载体的生命周期与子会话同生共死：建会话即上报 `running`，收尾上报
+`idle` 并从注册表注销。它是**附加信号**——登记失败只写诊断日志，子会话、轨迹、catalog、
+落盘一律不受影响（判据同 `lib/router.mjs` 的 `publishResilient`：已进注册表就保留，
+只少一次 `agent/created` 通知）。
+
 收尾信号取决于是**前台**还是**后台**子代理：
 
 - 前台：父线程的 `tool_result` 就是它的产出 → 到达即收尾。
