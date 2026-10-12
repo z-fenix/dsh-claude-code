@@ -18,11 +18,16 @@ mock.module("@anthropic-ai/claude-agent-sdk", {
       capturedOptions.push(options);
       return (async function* empty() {})();
     },
+    // goal-bridge 顶层 `import { createSdkMcpServer, tool }`；二者只在 buildGoalServer 内被调用，
+    // 本文件不触达，因此给惰性占位即可（缺了会在模块链接期直接 SyntaxError）。
+    createSdkMcpServer: () => ({}),
+    tool: () => ({}),
   },
 });
 
 const { makeCanUseTool } = await import("../lib/approval.mjs");
 const { runClaudeCode } = await import("../lib/claude-run.mjs");
+const { GOAL_TOOL_PREFIX } = await import("../lib/goal-bridge.mjs");
 
 const ev = (type, data) => ({ type, data, seq: 0 });
 const sessionWith = (events) => ({ snapshotEvents: () => events });
@@ -141,8 +146,9 @@ test("goal 桥接工具在 no-prompt（never）下仍放行，且早于策略短
     session: sessionWith([ev("sandbox/mode", { mode: "workspace-write" }), ev("approval/policy", { policy: "never" })]),
     agent: { id: "a1" },
   });
-  assert.deepEqual(await canUseTool("mcp__goal__get_goal", {}), { behavior: "allow" });
-  assert.deepEqual(await canUseTool("mcp__goal__update_goal", { action: "complete" }), { behavior: "allow" });
+  // 放行前缀直接取自 goal-bridge 的常量（而非字面量），server 改名时这里同步生效。
+  assert.deepEqual(await canUseTool(GOAL_TOOL_PREFIX + "get_goal", {}), { behavior: "allow" });
+  assert.deepEqual(await canUseTool(GOAL_TOOL_PREFIX + "update_goal", { action: "complete" }), { behavior: "allow" });
   // 非 goal 的 MCP 工具不受此放行影响
   assert.equal((await canUseTool("mcp__other__x", {})).behavior, "deny");
 });
