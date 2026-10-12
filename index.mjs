@@ -44,6 +44,13 @@ const ENGINE_DEFAULTS = {
   env: {},
   /** 手动指定模型上下文窗口（token 数）；SDK 取不到时兜底。 */
   contextWindow: undefined,
+  /** goal 模式：把 goal 工具桥接进 Claude Code，默认开（见 docs 的 goal 设计）。 */
+  goal: {
+    enabled: true,
+    blockedAfterConsecutiveRounds: 3,
+    /** 可选：仅在本插件 create_goal 且模型未给 max_goal_rounds 时透传。 */
+    defaultMaxGoalRounds: undefined,
+  },
 };
 
 export const Config = z.object({
