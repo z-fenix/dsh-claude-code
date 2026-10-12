@@ -202,3 +202,80 @@ test("update_goal：goal_id/revision 非法 → 拒绝且不调服务", async ()
   assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 0, action: "pause" })).isError, true);
   assert.equal(goals.calls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// update_goal：complete / blocked
+// ---------------------------------------------------------------------------
+/** 假 goal 服务补 complete/block。 */
+function fakeGoals2(initial) {
+  const calls = [];
+  return {
+    calls,
+    get: () => initial,
+    complete: (agent, ref) => { calls.push(["complete", ref]); return { ...initial, phase: "complete", revision: initial.revision + 1, activation: "disarmed" }; },
+    block: (agent, ref, reason) => { calls.push(["block", ref, reason]); return { ...initial, phase: "blocked", revision: initial.revision + 1, activation: "disarmed", blockedReason: reason }; },
+  };
+}
+
+test("complete：goal round 内允许（goalSource 与当前 goal 精确匹配）", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 1, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 1 } });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: {} });
+  const value = JSON.parse((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" })).content[0].text);
+  assert.deepEqual(goals.calls[0], ["complete", { id: "g1", revision: 2 }]);
+  assert.equal(value.goal.phase, "complete");
+});
+
+test("complete：既无人类回合也无匹配 goal round → 拒绝", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 1, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 5 } }), config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
+  assert.equal(result.isError, true);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("blocked：低于阈值拒绝，达到阈值通过并带 model-reported reason", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 2, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 2 } });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: { blockedAfterConsecutiveRounds: 3 } });
+  const rejected = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "no access" });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /at least 3 consecutive goal rounds/);
+
+  // 达到阈值：roundsStarted=3 的 goal
+  goals.get = () => ({ ...goal, roundsStarted: 3 });
+  const server2 = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 3 } }), config: { blockedAfterConsecutiveRounds: 3 } });
+  const okValue = JSON.parse((await toolOf(server2, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "no access" })).content[0].text);
+  assert.deepEqual(goals.calls.at(-1), ["block", { id: "g1", revision: 2 }, { code: "model-reported", message: "no access" }]);
+  assert.equal(okValue.goal.phase, "blocked");
+});
+
+test("blocked：缺 blocked_reason / 仅空白 → 拒绝", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 3 } });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: { blockedAfterConsecutiveRounds: 3 } });
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked" })).isError, true);
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "   " })).isError, true);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("complete 带 blocked_reason / complete 带 objective → 拒绝", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: true });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: {} });
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete", blocked_reason: "r" })).isError, true);
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete", objective: "n" })).isError, true);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("领域错误（revision 过期）→ isError，不外抛", async () => {
+  const goals = { get: () => ({ id: "g1", revision: 9, objective: "x", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" }), complete: () => { const e = new Error("goal complete does not preserve the current counters"); e.code = "GOAL_CONFLICT"; throw e; } };
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
+  assert.equal(result.isError, true);
+});
