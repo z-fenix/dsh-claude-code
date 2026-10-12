@@ -131,3 +131,74 @@ test("create_goal：显式 max_goal_rounds 覆盖默认", async () => {
   await toolOf(server, "create_goal").handler({ objective: "x", max_goal_rounds: 3 });
   assert.deepEqual(calls[0], { objective: "x", maxGoalRounds: 3 });
 });
+
+// ---------------------------------------------------------------------------
+// update_goal：edit / pause / resume
+// ---------------------------------------------------------------------------
+/** 递增 revision 的假 goal 服务，够 edit/pause/resume 用。 */
+function fakeGoals(initial) {
+  const calls = [];
+  let current = initial;
+  const bump = (phase) => { current = { ...current, revision: current.revision + 1, phase }; return current; };
+  return {
+    calls,
+    get: () => current,
+    edit: (agent, ref, replacements) => { calls.push(["edit", ref, replacements]); return (current = { ...current, ...replacements, revision: current.revision + 1 }); },
+    pause: (agent, ref) => { calls.push(["pause", ref]); return bump("paused"); },
+    resume: (agent, ref) => { calls.push(["resume", ref]); return bump("active"); },
+  };
+}
+const activeGoal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 0, maxGoalRounds: 8, activation: "armed" };
+const humanTurn = () => ({ hasHumanMessage: true });
+
+test("update_goal edit：人类回合 → 调 edit，替换 objective", async () => {
+  const goals = fakeGoals(activeGoal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  const value = JSON.parse((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "edit", objective: "new" })).content[0].text);
+  assert.deepEqual(goals.calls[0], ["edit", { id: "g1", revision: 2 }, { objective: "new" }]);
+  assert.equal(value.goal.objective, "new");
+});
+
+test("update_goal edit：无人类回合 → 拒绝", async () => {
+  const goals = fakeGoals(activeGoal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: false }), config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "edit", objective: "new" });
+  assert.equal(result.isError, true);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("update_goal pause/resume：人类回合可用", async () => {
+  // pause 与 resume 是两个独立场景：resume 用于 fork/恢复后对 active goal 的重新武装。
+  // 对「已 paused 且 revision 命中」的 goal 调 resume 会被守卫拒绝（见下一条用例）。
+  const paused = fakeGoals(activeGoal);
+  const pauseServer = buildGoalServer({ ctx: fakeCtx(paused, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  assert.equal(JSON.parse((await toolOf(pauseServer, "update_goal").handler({ goal_id: "g1", revision: 2, action: "pause" })).content[0].text).goal.phase, "paused");
+  const resumed = fakeGoals(activeGoal);
+  const resumeServer = buildGoalServer({ ctx: fakeCtx(resumed, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  assert.equal(JSON.parse((await toolOf(resumeServer, "update_goal").handler({ goal_id: "g1", revision: 2, action: "resume" })).content[0].text).goal.phase, "active");
+});
+
+test("update_goal resume：目标是 paused 时拒绝（只能用户恢复）", async () => {
+  const goals = fakeGoals({ ...activeGoal, phase: "paused" });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "resume" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /cannot resume a paused goal/);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("update_goal：非法参数组合被拒（edit 带 blocked_reason / pause 带 objective）", async () => {
+  const goals = fakeGoals(activeGoal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "edit", objective: "n", blocked_reason: "r" })).isError, true);
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "pause", objective: "n" })).isError, true);
+  assert.equal(goals.calls.length, 0);
+});
+
+test("update_goal：goal_id/revision 非法 → 拒绝且不调服务", async () => {
+  const goals = fakeGoals(activeGoal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: " ", revision: 2, action: "edit", objective: "n" })).isError, true);
+  assert.equal((await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 0, action: "pause" })).isError, true);
+  assert.equal(goals.calls.length, 0);
+});
