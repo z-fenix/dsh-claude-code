@@ -54,7 +54,7 @@ test("GOAL_TOOL_PREFIX：canUseTool 放行前缀与 server 名一致", () => {
 // ---------------------------------------------------------------------------
 const { buildGoalServer } = await import("../lib/goal-bridge.mjs");
 
-/** 一个记录调用的假 ctx：goals 服务 + 最小 agents 注册表。 */
+/** 一个记录调用的假 ctx：goals 服务 + 最小 agents 注册表 + 会记录 append 的假 session。 */
 function fakeCtx(goals, agent) {
   return {
     get: (key) => (key === "goals" ? goals : undefined),
@@ -62,6 +62,8 @@ function fakeCtx(goals, agent) {
       get: (id) => (id === agent.id ? agent : undefined),
       currentInitiator: () => agent,
     },
+    // 桥接代码没有任何正当理由触碰 ctx.session；任何 append 都会被这条记录逮到。
+    session: { appended: [], append(...args) { this.appended.push(args); } },
   };
 }
 const runningAgent = { id: "a1", status: "running" };
@@ -278,4 +280,24 @@ test("领域错误（revision 过期）→ isError，不外抛", async () => {
   const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: {} });
   const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
   assert.equal(result.isError, true);
+});
+
+// ---------------------------------------------------------------------------
+// §5 不变量：桥接代码绝不自己 append 会话事件（所有变更都走注入的 goals 服务）
+// ---------------------------------------------------------------------------
+test("§5：三个工具都不直接写 session —— 每次 goal 变更只经 goals 服务", async () => {
+  const goal = { id: "g1", revision: 1, objective: "x", phase: "active", roundsStarted: 0, maxGoalRounds: 8, activation: "armed" };
+  const calls = [];
+  const goals = {
+    get: () => goal,
+    create: (_agent, request) => { calls.push(["create", request]); return { ...goal, objective: request.objective }; },
+    edit: (_agent, ref, replacements) => { calls.push(["edit", ref, replacements]); return { ...goal, ...replacements, revision: goal.revision + 1 }; },
+  };
+  const ctx = fakeCtx(goals, runningAgent);
+  const server = buildGoalServer({ ctx, agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: {} });
+  await toolOf(server, "get_goal").handler({});
+  await toolOf(server, "create_goal").handler({ objective: "ship it" });
+  await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 1, action: "edit", objective: "new" });
+  assert.equal(calls.length, 2, "create_goal / update_goal 应各自落到 goals 服务");
+  assert.equal(ctx.session.appended.length, 0, "桥接代码不得直接 append 会话事件（§5 不变量）");
 });

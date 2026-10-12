@@ -146,9 +146,12 @@ test("goal 桥接工具在 no-prompt（never）下仍放行，且早于策略短
     session: sessionWith([ev("sandbox/mode", { mode: "workspace-write" }), ev("approval/policy", { policy: "never" })]),
     agent: { id: "a1" },
   });
-  // 放行前缀直接取自 goal-bridge 的常量（而非字面量），server 改名时这里同步生效。
+  // 放行工具名直接取自 goal-bridge 的常量（而非字面量），server 改名时这里同步生效。
   assert.deepEqual(await canUseTool(GOAL_TOOL_PREFIX + "get_goal", {}), { behavior: "allow" });
+  assert.deepEqual(await canUseTool(GOAL_TOOL_PREFIX + "create_goal", { objective: "x" }), { behavior: "allow" });
   assert.deepEqual(await canUseTool(GOAL_TOOL_PREFIX + "update_goal", { action: "complete" }), { behavior: "allow" });
+  // 只放行精确的三个工具名：goal server 下的其它工具名不享受自动放行，落到策略 → no-prompt 下拒绝。
+  assert.equal((await canUseTool(GOAL_TOOL_PREFIX + "unknown", {})).behavior, "deny");
   // 非 goal 的 MCP 工具不受此放行影响
   assert.equal((await canUseTool("mcp__other__x", {})).behavior, "deny");
 });

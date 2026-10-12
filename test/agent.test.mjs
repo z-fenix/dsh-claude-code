@@ -132,9 +132,15 @@ test("currentTurnContext：人类消息回合 → hasHumanMessage 为真、无 g
 
 test("currentTurnContext：goal round → 捕获 goalSource、hasHumanMessage 为假", async () => {
   const source = { kind: "goal", goalId: "g1", revision: 1, round: 1 };
-  const { agent } = await driveOneTurn({ role: "user", source, content: [{ type: "text", text: "<goal_round>…" }] });
+  // 与 drive() 实际 append 的必须是同一个对象：既用于 claim，也用于下面的逐位断言。
+  const claimedMessage = { role: "user", source, content: [{ type: "text", text: "<goal_round>…" }] };
+  const { session, agent } = await driveOneTurn(claimedMessage);
   const snapshot = runCalls.at(-1).turnContextSnapshot;
   assert.equal(snapshot.hasHumanMessage, false);
   assert.deepEqual(snapshot.goalSource, source);
   assert.deepEqual(agent.currentTurnContext(), { hasHumanMessage: false, goalSource: undefined });
+  // §5：转发路径不改写消息 —— user/message 事件与 claim 的消息逐位一致（含 source）。
+  const forwarded = session.events.find((event) => event.type === "user/message");
+  assert.ok(forwarded, "应有 user/message");
+  assert.deepEqual(forwarded.data, claimedMessage);
 });
