@@ -188,6 +188,39 @@ const childTexts = (child) => child.appended
 // tool_result，真正的产出随后作为 parent_tool_use_id 命中的转发消息到达，完成信号是
 // system/task_notification。旧实现把这个**启动回执**当成子代理结束，子会话当场被收尾，
 // 之后所有转发消息都被 #closedToolUseIds 丢弃——子会话里一条内容都不剩。
+test("子会话没有人类消息来源时不写自动标题或伪造人类输入", async () => {
+  const { manager, child } = makeManager();
+  manager.handleMessage(spawnMessage("tool-title-source", {
+    description: "列表展示验收", subagent_type: "Explore", prompt: "只读检查",
+  }));
+  await settle();
+  const events = child().snapshotEvents();
+  assert.equal(events.filter((event) => event.type === "session/title").length, 0);
+  assert.equal(events.filter((event) => event.type === "user/message").length, 0);
+  assert.equal(events.find((event) => event.type === "subagent/descriptor").data.provider, "claude-code");
+  manager.finishRun();
+  await settle();
+});
+
+test("子代理列表：任务 label 清洗及 provider 描述发布前落盘，不伪装可继续", async () => {
+  const { manager, host, child } = makeManager();
+  manager.handleMessage(spawnMessage("tool-display", {
+    description: "\u001b[31m 分析\n工具体系 \u001b[0m", subagent_type: "Explore",
+    prompt: "你是架构分析子智能体，只读。这是很长的角色模板。",
+  }));
+  await settle();
+  const catalog = host.parentSession.appended.find((event) => event.type === "subagent/catalog");
+  assert.equal(catalog.data.label, "分析 工具体系");
+  assert.equal(catalog.data.mode, "one-shot");
+  const descriptor = child().appended.find((event) => event.type === "subagent/descriptor");
+  assert.equal(descriptor.data.provider, "claude-code");
+  assert.equal(descriptor.data.label, "分析 工具体系");
+  assert.ok(host.persistence.created[0].storedEvents().includes(descriptor));
+  assert.equal(host.agents.get(child().id).status, "running");
+  manager.finishRun();
+  await settle();
+});
+
 test("后台子代理：启动回执不收尾，转发消息进子会话，task_notification 才收尾", async () => {
   const { manager, host, child } = makeManager();
   const toolUseId = "call_00_JlGePuqPdw7yyq49WhJ15568";

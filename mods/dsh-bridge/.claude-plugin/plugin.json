@@ -1,0 +1,6 @@
+{
+  "name": "dsh-bridge",
+  "version": "0.1.0",
+  "author": { "name": "dsh-claude-code contributors" },
+  "description": "Observe prompt composition and adapt DSH-owned goal tools through a scoped local bridge."
+}

@@ -2,11 +2,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DshInbox } from "../lib/inbox.mjs";
+import { RunInputLedger } from "../lib/run-input.mjs";
+import { attachFacts } from "./helpers/plugin-facts.mjs";
 
 /** 假会话：只记录 append，返回自增 seq。 */
 function fakeSession() {
   const events = [];
-  return {
+  return attachFacts({
     events,
     append(type, data, opts) {
       const event = { type, data, opts, seq: events.length };
@@ -14,7 +16,7 @@ function fakeSession() {
       return event;
     },
     snapshotEvents: () => events,
-  };
+  });
 }
 
 function fakeDispatch() {
@@ -23,6 +25,36 @@ function fakeDispatch() {
 }
 
 const msg = (id, text = id) => ({ id, role: "user", content: [{ type: "text", text }] });
+
+test("peek 不认领消息，消费快照不吃掉后来追加的输入", () => {
+  const session = fakeSession();
+  const dispatch = fakeDispatch();
+  const inbox = new DshInbox(session, dispatch);
+  inbox.append("next-step", msg("s1"));
+  inbox.append("next-turn", msg("t1"));
+  const before = session.events.length;
+  const selected = inbox.peek("next-turn");
+  assert.deepEqual(selected.map((item) => item.id), ["s1", "t1"]);
+  assert.equal(session.events.length, before);
+  inbox.append("next-step", msg("s2"));
+  assert.deepEqual(inbox.consume(selected, 1).map((item) => item.id), ["s1", "t1"]);
+  assert.deepEqual(inbox.nextStep.map((item) => item.id), ["s2"]);
+  assert.equal(dispatch.seen.filter((item) => item.name === "agent/inbox/claimed").length, 2);
+});
+
+test("准备期间被编辑或删除的快照不能再消费旧内容", () => {
+  const inbox = new DshInbox(fakeSession(), fakeDispatch());
+  inbox.append("next-step", msg("s1"));
+  inbox.append("next-turn", msg("t1"));
+  const selected = inbox.peek("next-turn");
+  inbox.replace("s1", msg("s1", "edited"));
+  assert.deepEqual(inbox.consume(selected, 1), []);
+  assert.equal(inbox.nextTurn.length, 1);
+  const next = inbox.peek("next-turn");
+  inbox.remove("t1");
+  assert.deepEqual(inbox.consume(next, 1), []);
+  assert.equal(inbox.nextStep[0].content[0].text, "edited");
+});
 
 test("append 写入 agent/inbox/spliced 并发 inserted 通知", () => {
   const session = fakeSession();
@@ -129,4 +161,53 @@ test("构造时从日志折叠出 pending 状态", () => {
 
   assert.deepEqual(restored.nextTurn.map((m) => m.id), ["m1"]);
   assert.deepEqual(restored.nextStep.map((m) => m.id), ["m2"]);
+});
+
+for (const operation of ["remove", "clear"]) {
+  test(`${operation} 清理持久 steer 意图，旧 next-step 不猜测为 querying`, () => {
+    const session = fakeSession();
+    const inbox = new DshInbox(session, fakeDispatch());
+    inbox.enqueue("next-step", msg("reused"), true);
+    if (operation === "remove") inbox.remove("reused");
+    else inbox.clear();
+    inbox.append("next-step", msg("reused", "legacy inject"));
+    const restored = new DshInbox(session, fakeDispatch());
+    assert.equal(restored.steers.has("reused"), false);
+  });
+}
+
+test("编辑保留 steer 意图但不会恢复旧 reservation 文本", () => {
+  const session = fakeSession();
+  const inbox = new DshInbox(session, fakeDispatch());
+  const old = msg("edited");
+  inbox.enqueue("next-step", old, true);
+  new RunInputLedger(session, "e1").record(old.id, "reserved", { message: old, ...inbox.placement(old) });
+  inbox.replace(old.id, msg("edited", "new"));
+  const restored = new DshInbox(session, fakeDispatch());
+  assert.equal(restored.nextStep[0].content[0].text, "new");
+  assert.equal(restored.steers.has("edited"), true);
+  restored.consume(restored.peek("next-step"), 1);
+  assert.equal(new DshInbox(session, fakeDispatch()).hasPending, false);
+});
+
+test("提交边界后的整批输入不恢复，明确清空也不复活未提交 claim", () => {
+  for (const submitted of [false, true]) {
+    const session = fakeSession();
+    const inbox = new DshInbox(session, fakeDispatch());
+    const ledger = new RunInputLedger(session, "e1");
+    const messages = [msg("a"), msg("b")];
+    for (const message of messages) {
+      inbox.enqueue("next-step", message, true);
+      ledger.record(message.id, "reserved", { message, ...inbox.placement(message) });
+    }
+    inbox.consume(messages, 1);
+    if (submitted) ledger.submitBatch(["a", "b"], { sdkUuid: "b", shouldQuery: true });
+    else inbox.clear();
+    assert.equal(new DshInbox(session, fakeDispatch()).hasPending, false);
+    if (submitted) {
+      const recovered = new RunInputLedger(session, "e2");
+      assert.equal(recovered.stateOf("a"), "uncertain");
+      assert.equal(recovered.stateOf("b"), "uncertain");
+    }
+  }
 });

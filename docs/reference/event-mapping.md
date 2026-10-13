@@ -4,16 +4,20 @@ title: 事件映射
 description: Claude Agent SDK 消息 → DSH 会话事件 / 实时帧的对照表。
 resource: lib/claude-run.mjs
 tags: [reference, events, trace]
-timestamp: 2026-08-14
+timestamp: 2026-10-13
 ---
 
 # 回合与 step 的分界
 
 一次 Claude Code 查询 = 一个 DSH **回合**（`turn/start` … `turn/end`，由 `lib/agent.mjs` 写）。
-一条 Claude assistant 消息 = 一个 DSH **step**（`step/start` … `step/end`，由 `lib/claude-run.mjs` 写）。
+一个 Claude API 响应 = 一个 DSH **step**（`step/start` … `step/end`，由 `lib/claude-run.mjs` 写）。
+SDK 可将同一响应的文本/工具分别发送为多个 `assistant` envelope，`message.id` 相同；这些分块合并，
+不能每条都关 step，否则并行工具的真实结果会被提前补写的 interrupted 错误替代。
+缺少响应 id 的旧消息保留原来的消息边界兜底。
 
-一次查询里 Claude 可能连续产出多条 assistant 消息（每次工具调用前后各一条），它们都属于
-同一个回合，各自一个 step。
+`message_start` 的响应身份在新 stream 分片进入前结算旧响应；`message_stop`、下一响应、`result` 或
+查询 EOF 结算完整响应。早于响应结束的工具结果先保存，广告调用后再写真实结果；未知回执不推动边界。
+真正缺失的结果仍需在 step 关闭前补写错误，以保持日志合法。
 
 `result` 只代表 **CLI 的一个回合**结束，**不代表这次查询结束**：只要还有后台子代理在跑，
 CLI 会留在同一个 `query()` 流上继续产出（补一条 `system/init` → 把通知唤醒出来的助手消息
@@ -22,7 +26,7 @@ step 与首轮 step 同属一个回合（不伪造 `user/message`）。
 
 # SDK 消息 → 会话事件
 
-| Claude Agent SDK | DSH 会话事件 | 说明 |
+| Claude Agent SDK | DSH 会话事件 / 插件私有事实 | 说明 |
 |---|---|---|
 | `system/init` | `request/header`（`reason: "initial"`） | 模型名与内建工具表；工具名经 wire 映射。只在首轮或 model/tools 变化时写 |
 | `stream_event` `content_block_delta`（text） | — | 转成实时帧（见下），最终进 `assistant/message.stream` |
@@ -30,9 +34,22 @@ step 与首轮 step 同属一个回合（不伪造 `user/message`）。
 | `stream_event` `content_block_delta`（input_json） | — | 同上，`tool-call-delta` |
 | `stream_event` `message_delta` | — | 本条消息的权威用量，落在随后那条 `assistant/message` 的 `usage` 上 |
 | `assistant` | `assistant/message`（+ `tool/call` ×N） | content 走块映射；工具调用另写 `tool/call` 供卡片渲染 |
-| `user`（tool_result） | `tool/result` | `AskUserQuestion` 的结果不标 `isError`（它是答案，不是错误） |
+| `user`（tool_result） | `tool/result` | 按 callId 配对；早到结果等待所属响应完成，未知/重复回执不写；`AskUserQuestion` 的结果不标 `isError` |
+| 本地 querying 意图 / reservation / 提交 / 回显 / 结果 UUID | `claude-code/input-intent`、`claude-code/input`、`claude-code/input-batch`、`claude-code/input-receipt` | 持久意图、逐消息台账、原子批次提交边界和 receipt；回显仅代表收到，匹配 success 结果才证明消费 |
+| mod `prompt.compose` | `claude-code/prompt-snapshot` | 有序 sections、model、digest、epoch；source=observed-compose、completeness=partial、compositionLoop=unattributed |
+| mod 能力 / 启动握手 / 当前 mod 的固定 `system/ui_log` 失效通知 | `claude-code/mod-status` | ready / fallback / unsupported / capture-disabled；精确 goal transport 与捕获状态，不含令牌或桥接地址；失效不改 composition 或 goal adapter |
 | `result` | `request/context` | 写模型上下文窗口（`modelUsage` 取不到时用配置兜底）；并收掉当前 step——**不结束 run**（后台子代理的续跑随后继续写进同一回合的新 step） |
 | `system/task_*`、带 `parent_tool_use_id` 的消息 | 子会话事件 | 开启子代理追踪时归位到独立子会话；关闭时丢弃 |
+
+表中的 `claude-code/*` 是**独立插件台账的事实类型**，不是新追加的 DSH 会话事件。
+台账位于 `${DSH_CLAUDE_CODE_STORE:-~/.dsh/dsh-claude-code}/facts/<sessionId摘要>.jsonl`，写入与 flush
+成功后才更新投递状态。每条记录有私有 `factSeq` 和原生日志锚点；`readSessionEvents` 仍只返回原生
+日志，只有输入/快照折叠使用合并视图。已有 manifest 的台账缺失、损坏或锚点不一致时停止投递，不
+静默按空历史继续。旧日志中已标记 `ignorable:true` 的同名事实只读兼容，不重写成新的原生事件。
+
+DSH 0.2.0-rc.2 的 `Session.append` 不保存 `ignorable` 选项；运行时能追加未知事件不代表重启能读取。
+历史修复必须备份和停写，且以完整 format catalog restoration / persistence 校验为准；只跑事件关系
+或 append admission 校验不能证明重启兼容。快照返回 `factSeq`；仅旧日志引用使用 `legacySeq`。
 
 # 顺序（同一步内）
 
@@ -71,6 +88,29 @@ CLI 进程内，不经过 DSH 的 `tools/pre-execute`，所以前一条路对插
 **实时帧只承载增量。** `agent/assistant-stream` 的分片会被客户端自增渲染，所以帧里只放
 文本 / 思考 / 工具入参分片，不放整块内容；完整内容在 `assistant/message` 的 `content` 与
 `stream` 里。
+
+# 输入与提示词事实
+
+每个 query 只有一份持久 async 输入流和 epoch，不用多个有限 `streamInput()` 来模拟追加。
+宿主 inbox 先非破坏性 peek，图片准备后核对消息对象未被编辑/删除才 consume。普通 followup 不进活查询，
+steer 使用 querying 输入，inject 使用 `shouldQuery:false`，不会自己启动模型回合。
+
+投递状态为 pending/reserved/submitted/observed/canceled/uncertain。首批输入在 dequeue 前就保存 reserved，
+其中含 message、原 queue/position 和 querying 意图；运行中批次同样先 reserve，后 claim / user surface。
+整个 SDK envelope 的 submitted 边界由一条 `claude-code/input-batch` 保存，拒写不会只提交半批。
+该边界仍先于实际交付，因此崩溃后的 submitted 只能按 uncertain 对待；不因缺少 receipt 而重发。
+
+重开时旧 epoch 的 reserved 派生为 pending，submitted 派生为 uncertain；派生本身不追加状态转换事件。
+仅带完整原队列信息且可证明未提交的 reservation 会恢复为原生 inbox splice；已在队列的消息不会重复插入。
+用户编辑/删除的旧 reservation 不复活，明确清空也取消孤立的未提交 claim。旧版本缺少恢复信息的事实不会猜测重投。
+`claude-code/input-intent` 保留 steer 的 querying 意图；编辑保留同 id 的意图，删除、取消和 claim 清理，
+恢复 reservation 时重新登记原意图。缺少意图的旧 next-step 保守地按 inject 处理，不自动 querying。
+中断回执不能单独证明取消或消费；`keepInbox` 不收回已提交消息。
+
+`claude-code/prompt-snapshot` 是本机 hook 的观察事实，不是原生模型 surface。保留 sections 的 id、text、
+scope 和顺序；只去重相同连续 digest，不解析 assistant 自称的提示词。`compositionLoop: unattributed`
+表示绑定的宿主 agent 只是桥接所有者，不能证明捕获的 Claude 内部循环身份。首 user surface 的顺序、
+最终 prompt 完整性和循环归属均未证明，因此不写 `system/message`，也不写 `request/header.system`。
 
 # 实时帧协议
 
@@ -122,7 +162,11 @@ session projection：整表替换、last-write-wins、`turn/start` 重置）。�
 以主轨迹里的 `Agent` / `Task` `tool_use` 块为**权威信号**：每个子代理用它的 `tool_use` id
 作身份键，带 `parent_tool_use_id` 的转发消息据此归位。每个子代理是一个独立 DSH 子会话
 （`origin: "subagent"` + `parentSession` + `delegationDepth` + `subagent/descriptor`），
-只读、不可续跑，完成后 flush 再 detach（仍可读轨迹）。
+只读、不可续跑，完成后 flush 再 detach（仍可读轨迹）。新子会话的 `subagent/catalog.label` 使用清洗后的
+短任务 description/type/name（不解析角色 prompt，最多 48 个 Unicode code points）；provider 保留在
+`subagent/descriptor`。原生非 user `session/title` 必须引用本子会话已有的人类 `user/message`，只读投影
+没有这种来源，因此不写自动来源/类型标题、不伪造人类消息。不会重写旧标题，也不覆盖人工重命名。
+列表 token 为累计真实用量，不是当前上下文压力。
 
 每个子会话还会登记一个**只做状态载体的被动 Agent**（`lib/child-agent.mjs`，不驱动任何回合、
 不接受输入）。原因：lineage 面板每行的运行状态只来自宿主对子会话的 running 判定，而 running

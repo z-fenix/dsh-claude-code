@@ -9,6 +9,8 @@
 // 才渲染（实测表现：每轮结束后的文件变更延迟到下一次发消息才显示）。
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
+import { RunInputLedger } from "../lib/run-input.mjs";
+import { attachFacts } from "./helpers/plugin-facts.mjs";
 
 // --- 模块 mock：drive() 的两个外部依赖，避免拉起真实 claude CLI 与宿主服务 ---
 let runCalls = [];
@@ -28,7 +30,11 @@ mock.module("../lib/claude-run.mjs", {
     PROVIDER: realClaudeRun.PROVIDER,
     runClaudeCode: async (options) => {
       runCalls.push({ ...options, turnContextSnapshot: typeof options.turnContext === "function" ? options.turnContext() : undefined });
-      return { ...runResult };
+      if (runResult.initialSubmitted !== false) {
+        const ids = options.initialMessages.filter((message) => typeof message.id === "string").map((message) => message.id);
+        if (ids.length) new RunInputLedger(options.session, options.inputEpoch).submitBatch(ids, { sdkUuid: ids.at(-1), shouldQuery: true });
+      }
+      return { ...runResult, initialSubmitted: runResult.initialSubmitted ?? true };
     },
   },
 });
@@ -47,7 +53,7 @@ import { Context } from "@deepseek-ai/cordis";
  */
 function fakeSession(timeline) {
   const events = [];
-  return {
+  return attachFacts({
     id: "s1",
     header: { cwd: "D:/tmp/workspace" },
     events,
@@ -60,7 +66,7 @@ function fakeSession(timeline) {
     snapshotEvents: () => [...events],
     requestHeader: () => undefined,
     requestContext: () => undefined,
-  };
+  });
 }
 
 /** 假 dispatch：serial/emit 都记进 timeline。 */
@@ -83,14 +89,7 @@ async function driveOneTurn(message = { role: "user", source: { kind: "user" }, 
   ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
   const agent = new ClaudeCodeAgent(ctx, "agent-1", {}, session, { traceSubagents: false });
   agent.dispatch = fakeDispatch(timeline);
-  agent.inbox = {
-    nextTurn: [message],
-    // 真实 DshInbox.claim 会把队列取空；假件必须同样如此，否则 drive() 死循环。
-    claim: (_target, _turn) => {
-      agent.inbox.nextTurn = [];
-      return [message];
-    },
-  };
+  agent.inbox.append("next-turn", message);
   agent.wakeDriver();
   await agent.whenIdle();
   return { session, timeline, agent };
@@ -120,6 +119,27 @@ test("logIntact=false 时回合不补 turn/end，也不派发 turn-stopping", as
     assert.equal(timeline.indexOf("dispatch:agent/turn-stopping"), -1, "turn 未闭合时不应派发 turn-stopping");
   } finally {
     runResult = { output: [{ type: "text", text: "ok" }], stopReason: "completed", claudeSessionId: "claude-1", logIntact: true };
+  }
+});
+
+test("日志拒写后停止整个驱动，后续 followup 留在 inbox", async () => {
+  const timeline = [];
+  const session = fakeSession(timeline);
+  const ctx = new Context();
+  ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
+  const agent = new ClaudeCodeAgent(ctx, "agent-1", {}, session, { traceSubagents: false });
+  agent.dispatch = fakeDispatch(timeline);
+  const before = runCalls.length;
+  runResult = { output: [], stopReason: "error", logIntact: false };
+  try {
+    for (const id of ["first", "pending"]) agent.inbox.append("next-turn", { id, role: "user", source: { kind: "user" }, content: [{ type: "text", text: id }] });
+    agent.wakeDriver();
+    await agent.whenIdle();
+    assert.equal(runCalls.length - before, 1);
+    assert.deepEqual(agent.inbox.nextTurn.map((message) => message.id), ["pending"]);
+  } finally {
+    runResult = { output: [{ type: "text", text: "ok" }], stopReason: "completed", claudeSessionId: "claude-1", logIntact: true };
+    await agent.dispose();
   }
 });
 

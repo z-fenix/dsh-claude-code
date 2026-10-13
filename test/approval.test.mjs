@@ -140,6 +140,47 @@ test("非 bypass 策略下同样把 canUseTool 交给 SDK", async () => {
   assert.equal(capturedOptions[0].permissionMode, undefined);
 });
 
+test("read-only + never 不因 blockedPath 在工作区内而放行写入", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "never" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("Write", { file_path: "/w/a.txt", content: "x" }, { blockedPath: "/w/a.txt" });
+  assert.equal(result.behavior, "deny");
+});
+
+test("read-only + ask 的工作区写入仍需用户审批", async () => {
+  const requests = [];
+  const canUseTool = makeCanUseTool({ get: (key) => key === "approval" ? {
+    request: async (request) => { requests.push(request); return "denied"; },
+  } : undefined }, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "ask" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("Write", { file_path: "/w/a.txt" }, { blockedPath: "/w/a.txt" });
+  assert.equal(result.behavior, "deny");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].toolName, "Write");
+});
+
+test("workspace-write 的区内路径可放行，切成 read-only 后下一调用立即拒绝", async () => {
+  const events = [ev("sandbox/mode", { mode: "workspace-write" }), ev("approval/policy", { policy: "never" })];
+  const canUseTool = makeCanUseTool(baseCtx(undefined), { cwd: "/w", session: sessionWith(events), agent: { id: "a1" } });
+  assert.deepEqual(await canUseTool("Write", {}, { blockedPath: "/w/a.txt" }), { behavior: "allow" });
+  assert.equal((await canUseTool("Write", {}, { blockedPath: "/elsewhere/a.txt" })).behavior, "deny");
+  events.push(ev("sandbox/mode", { mode: "read-only" }));
+  assert.equal((await canUseTool("Write", {}, { blockedPath: "/w/a.txt" })).behavior, "deny");
+});
+
+test("没有 mode 时不把工作区路径当作写入许可", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w", session: sessionWith([ev("approval/policy", { policy: "never" })]), agent: { id: "a1" },
+  });
+  assert.equal((await canUseTool("Write", {}, { blockedPath: "/w/a.txt" })).behavior, "deny");
+});
+
 test("goal 桥接工具在 no-prompt（never）下仍放行，且早于策略短路", async () => {
   const canUseTool = makeCanUseTool(baseCtx(undefined), {
     cwd: "/w",

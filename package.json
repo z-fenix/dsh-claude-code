@@ -12,6 +12,7 @@
   "files": [
     "index.mjs",
     "lib",
+    "mods",
     "cordis.patch.yml",
     "README.md",
     "README_EN.md",

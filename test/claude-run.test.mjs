@@ -176,6 +176,113 @@ test("多条 Claude 助手消息 = 同一 turn 内多个 step", () => {
   assert.ok(assistant.every((event) => event.data.turn === 5));
 });
 
+test("同一 API 响应的多个 assistant 分块保留并行工具的真实结果", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  for (const [id, name] of [["r1", "Read"], ["r2", "Read"], ["r3", "Read"], ["g1", "Grep"]]) {
+    tracer.handleMessage({ type: "assistant", uuid: `assistant-${id}`, parent_tool_use_id: null,
+      message: { id: "response-1", content: [{ type: "tool_use", id, name, input: {} }],
+        usage: { input_tokens: 10, output_tokens: 20 } } });
+  }
+  for (const id of ["r2", "r1", "g1", "r3"]) {
+    tracer.handleMessage({ type: "user", parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: id, content: `actual-${id}` }] } });
+  }
+  tracer.handleMessage({ type: "result", subtype: "success", result: "done" });
+  tracer.finish();
+
+  const results = sink.events.filter((event) => event.type === "tool/result");
+  assert.deepEqual(results.map((event) => [event.data.message.toolCallId, event.data.message.content[0].text]),
+    [["r2", "actual-r2"], ["r1", "actual-r1"], ["g1", "actual-g1"], ["r3", "actual-r3"]]);
+  assert.ok(results.every((event) => event.data.message.isError === false));
+  assert.deepEqual(sink.events.filter((event) => event.type === "step/start").map((event) => event.data.step), [1]);
+  const assistants = sink.events.filter((event) => event.type === "assistant/message");
+  assert.equal(assistants.length, 1);
+  assert.deepEqual(assistants[0].data.message.content.map((block) => block.id), ["r1", "r2", "r3", "g1"]);
+  assert.equal(assistants[0].data.usage.inputTokens, 10);
+});
+
+test("同一响应工具结果早于后续 assistant 分块时不提前关闭 step", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  const assistant = (id) => ({ type: "assistant", uuid: `assistant-${id}`,
+    message: { id: "response-1", content: [{ type: "tool_use", id, name: "Read", input: {} }] } });
+  const result = (id) => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: `actual-${id}` }] } });
+  tracer.handleMessage(assistant("r1"));
+  tracer.handleMessage(result("r1"));
+  tracer.handleMessage(assistant("r2"));
+  tracer.handleMessage(assistant("r3"));
+  tracer.handleMessage(result("r3"));
+  tracer.handleMessage(result("r2"));
+  tracer.finish();
+
+  const results = sink.events.filter((event) => event.type === "tool/result");
+  assert.deepEqual(results.map((event) => event.data.message.content[0].text), ["actual-r1", "actual-r3", "actual-r2"]);
+  assert.ok(results.every((event) => event.data.message.isError === false));
+  assert.equal(sink.events.filter((event) => event.type === "step/start").length, 1);
+});
+
+test("流式响应分块聚合且 message_start 隔离下一响应的 stream", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  tracer.handleMessage({ type: "stream_event", event: { type: "message_start", message: { id: "response-1" } } });
+  for (const [index, id] of [[0, "r1"], [1, "r2"]]) {
+    tracer.handleMessage({ type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "tool_use", id, name: "Read" } } });
+    tracer.handleMessage({ type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: '{"file_path":"a.md"}' } } });
+    tracer.handleMessage({ type: "assistant", message: { id: "response-1", content: [{ type: "tool_use", id, name: "Read", input: { file_path: "a.md" } }] } });
+  }
+  tracer.handleMessage({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1", content: "actual-r1" }] } });
+  tracer.handleMessage({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r2", content: "actual-r2" }] } });
+  // 无 message_stop 的 emitter 仍有下一响应的 message_start，不可把新 stream 喂进旧 attempt。
+  tracer.handleMessage({ type: "stream_event", event: { type: "message_start", message: { id: "response-2" } } });
+  tracer.handleMessage({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+  tracer.handleMessage({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done" } } });
+  tracer.handleMessage({ type: "assistant", message: { id: "response-2", content: [{ type: "text", text: "done" }] } });
+  tracer.finish();
+
+  const assistants = sink.events.filter((event) => event.type === "assistant/message");
+  assert.equal(assistants.length, 2);
+  assert.deepEqual(assistants[0].data.message.content.map((block) => block.id), ["r1", "r2"]);
+  assert.ok(assistants[0].data.stream.every((item) => item.type !== "text-chunks"));
+  assert.deepEqual(assistants[1].data.message.content, [{ type: "text", text: "done" }]);
+  assert.equal(frames.filter((frame) => frame.chunk?.type === "text-delta").length, 1);
+  assert.equal(sink.events.filter((event) => event.type === "tool/result" && event.data.message.isError).length, 0);
+});
+
+test("不同响应的 message_start 在新分片进入前结算旧 attempt", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  for (const [id, text] of [["response-1", "first"], ["response-2", "second"]]) {
+    tracer.handleMessage({ type: "stream_event", event: { type: "message_start", message: { id } } });
+    tracer.handleMessage({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+    tracer.handleMessage({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } } });
+    tracer.handleMessage({ type: "assistant", message: { id, content: [{ type: "text", text }] } });
+  }
+  tracer.finish();
+  const assistants = sink.events.filter((event) => event.type === "assistant/message");
+  assert.deepEqual(assistants.map((event) => event.data.message.content[0].text), ["first", "second"]);
+  assert.deepEqual(assistants.map((event) => event.data.stream.filter((item) => item.type === "text-chunks").flatMap((item) => item.texts)), [["first"], ["second"]]);
+  assert.deepEqual(frames.filter((frame) => frame.chunk?.type === "text-delta").map((frame) => [frame.attemptId, frame.chunk.text]), [["s1:1.1", "first"], ["s1:1.2", "second"]]);
+});
+
+test("未知工具回执不结算正在组装的响应", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  tracer.handleMessage({ type: "assistant", message: { id: "response-1", content: [{ type: "tool_use", id: "r1", name: "Read", input: {} }] } });
+  tracer.handleMessage({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "unknown", content: "unrelated" }] } });
+  tracer.handleMessage({ type: "assistant", message: { id: "response-1", content: [{ type: "tool_use", id: "r2", name: "Read", input: {} }] } });
+  tracer.handleMessage({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "r1", content: "actual-r1" },
+    { type: "tool_result", tool_use_id: "r2", content: "actual-r2" },
+  ] } });
+  tracer.finish();
+  const results = sink.events.filter((event) => event.type === "tool/result");
+  assert.deepEqual(results.map((event) => event.data.message.content[0].text), ["actual-r1", "actual-r2"]);
+  assert.equal(sink.events.filter((event) => event.type === "step/start").length, 1);
+});
+
 test("AskUserQuestion 的 deny 结果不标记为错误", () => {
   const sink = fakeSink();
   const tracer = new ClaudeRunTracer(sink, 1);

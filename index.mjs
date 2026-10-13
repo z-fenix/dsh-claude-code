@@ -44,9 +44,12 @@ const ENGINE_DEFAULTS = {
   env: {},
   /** 手动指定模型上下文窗口（token 数）；SDK 取不到时兜底。 */
   contextWindow: undefined,
-  /** goal 模式：把 goal 工具桥接进 Claude Code，默认开（见 docs 的 goal 设计）。 */
+  /** 按所选 CLI 的实际能力捕获 compose 快照，不改用户全局插件配置。 */
+  mods: { enabled: true, handshakeTimeoutMs: 8000 },
+  /** goal 模式：默认 MCP；mod/auto 是同一领域处理器的可选适配。 */
   goal: {
     enabled: true,
+    transport: "mcp",
     blockedAfterConsecutiveRounds: 3,
     /** 可选：仅在本插件 create_goal 且模型未给 max_goal_rounds 时透传。 */
     defaultMaxGoalRounds: undefined,
@@ -95,7 +98,10 @@ export const claudeCodeEngine = {
    * @returns {ClaudeCodeAgent}
    */
   makeAgent(loopCtx, id, options, session, engineConfig) {
-    const config = { ...ENGINE_DEFAULTS, ...(engineConfig ?? {}) };
+    const config = { ...ENGINE_DEFAULTS, ...(engineConfig ?? {}),
+      goal: { ...ENGINE_DEFAULTS.goal, ...engineConfig?.goal },
+      mods: { ...ENGINE_DEFAULTS.mods, ...engineConfig?.mods },
+    };
     const machine = new ClaudeCodeAgent(loopCtx, id, options, session, config);
     // resume 路径：把上一进程捕获的 Claude 会话 id 读回来，首轮即续接同一个 Claude 会话。
     machine.loadResumeState = async () => {

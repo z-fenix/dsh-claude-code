@@ -534,3 +534,80 @@ test("resume 时会话已 live：必须复用而不 prepare / 不重复 enter", 
   assert.deepEqual(calls.enter, [], "会话已 live 时不得再 enter（会抛 already exists）");
   assert.deepEqual(calls.announce, [], "会话已 live 时不得重发 session/created");
 });
+
+// 回归护栏（实测故障，session-1aee3556）：
+//   resume 后日志校验失败：`turn/start does not open the expected turn`
+//
+// 成因：本路由的 resume 复刻了原生的 prepare + publish + appendUnstoredSuffix，却漏了
+// @deepseek-ai/dsh-agent-loop 在 resume 里必做的一步——`interruptedTurnClosers(persisted)`
+// 把崩溃 / 退出时停在开着的 turn、step 关掉，再连同 persisted 一起 seed。漏了它，下一次
+// turn/start 就会嵌套在前一个未关闭的 turn 里，会话永久打不开。
+// 契约：closers 必须先落盘（handle.append）再 seed 进 prepare；storedCount 含 closers。
+test("resume 时把悬空回合补上 closer：先落盘再 seed（避免下一个 turn/start 嵌套）", async () => {
+  const persisted = [
+    { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+    { type: "step/start", seq: 1, time: 2, data: { turn: 1, step: 1 } },
+  ];
+  const appended = [];
+  const prepares = [];
+
+  const agent = {
+    id: "s-dangle",
+    async runMaintenance(job) { return job(); },
+    cancel() {},
+    async whenIdle() {},
+    async dispose() {},
+    async announce() {},
+  };
+
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {} },
+    on() {},
+    agents: { enter() { return () => {}; }, async announce() {} },
+    sessions: {
+      get: () => undefined,
+      prepare(id, options) { prepares.push({ id, options }); return { id }; },
+      enter() { return () => {}; },
+      announce() {},
+    },
+    get(name) {
+      if (name !== "sessionPersistence") return undefined;
+      return {
+        async open() {
+          return {
+            header: { agentPreset: "claude-code" },
+            inheritedEventCount: 0,
+            async read() { return { events: structuredClone(persisted), eventState: "detached" }; },
+            async append(events) { appended.push(...events); },
+            async close() {},
+          };
+        },
+      };
+    },
+  };
+
+  const original = {
+    async createAgent() { throw new Error("not used"); },
+    async resume() { throw new Error("not used"); },
+    prepare() { return { agent, signal: new AbortController().signal, dispose: async () => {} }; },
+  };
+
+  const router = new EngineRouter(ctx, {
+    defaultEngine: DEEPSEEK_ENGINE_ID, engineByPreset: {}, engines: {},
+  }, original, makeRegistryWithAgent(agent));
+
+  await router.resume({}, { resumeSessionId: "s-dangle" });
+
+  // 1) 悬空回合（开着的 step + turn）必须被关掉并先落盘。
+  assert.equal(appended.length, 2, `应追加 step/end + turn/end，实际 ${JSON.stringify(appended)}`);
+  assert.equal(appended[0].type, "step/end");
+  assert.equal(appended[1].type, "turn/end");
+  assert.equal(appended[1].data.reason.kind, "interrupted");
+
+  // 2) seed 必须含 closer，否则内存会话仍悬空，下一个 turn/start 会嵌套。
+  assert.equal(prepares.length, 1, "必须 prepare 一次");
+  const seed = prepares[0].options.seed;
+  assert.ok(Array.isArray(seed), "重建必须带 seed");
+  assert.equal(seed.length, persisted.length + 2);
+  assert.equal(seed.at(-1).type, "turn/end");
+});

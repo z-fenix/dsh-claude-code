@@ -53,6 +53,7 @@ test("GOAL_TOOL_PREFIX：canUseTool 放行前缀与 server 名一致", () => {
 // buildGoalServer + get_goal
 // ---------------------------------------------------------------------------
 const { buildGoalServer } = await import("../lib/goal-bridge.mjs");
+const { buildGoalHandlers, goalToolDefinitions } = await import("../lib/goal-domain.mjs");
 
 /** 一个记录调用的假 ctx：goals 服务 + 最小 agents 注册表 + 会记录 append 的假 session。 */
 function fakeCtx(goals, agent) {
@@ -280,6 +281,67 @@ test("领域错误（revision 过期）→ isError，不外抛", async () => {
   const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: () => ({ hasHumanMessage: true }), config: {} });
   const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
   assert.equal(result.isError, true);
+});
+
+test("domain / MCP 在相同输入下返回相同结果，不接受自报人类权限", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" };
+  const scenarios = [
+    ["get_goal", {}, false],
+    ["create_goal", { objective: "long task" }, true],
+    ["create_goal", { objective: "long task" }, false],
+    ["create_goal", { objective: "long task", hasHumanMessage: true }, false],
+    ["update_goal", { goal_id: "g1", revision: 2, action: "complete" }, false],
+    ["update_goal", { goal_id: "g1", revision: 1, action: "complete" }, true],
+    ["update_goal", { goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "no access" }, false],
+    ["update_goal", { goal_id: "g1", revision: 2, action: "unknown" }, true],
+  ];
+  for (const [name, args, human] of scenarios) {
+    const goals = { get: () => goal, create: () => goal,
+      complete: (_agent, ref) => { if (ref.revision !== goal.revision) throw new Error("GOAL_CONFLICT"); return { ...goal, phase: "complete" }; },
+      block: () => ({ ...goal, phase: "blocked" }),
+    };
+    const options = { ctx: fakeCtx(goals, runningAgent), agent: runningAgent,
+      turnContext: () => ({ hasHumanMessage: human, goalSource: { goalId: "g1", revision: 2, round: 3 } }), config: {} };
+    const domain = buildGoalHandlers(options);
+    const mcp = buildGoalServer(options);
+    assert.deepEqual(await domain[name](args), await toolOf(mcp, name).handler(args));
+  }
+  const handlers = buildGoalHandlers({ ctx: fakeCtx({ create: () => { throw new Error("must not create"); } }, runningAgent), agent: runningAgent,
+    turnContext: () => ({ hasHumanMessage: false }), config: {} });
+  assert.equal((await handlers.create_goal({ objective: "x", source: { kind: "user" } })).isError, true);
+});
+
+test("domain 入口要求精确 live running agent 与开放回合", async () => {
+  let reads = 0;
+  const agent = { id: "caller", status: "running" };
+  const ctx = fakeCtx({ get: () => { reads += 1; return activeGoal; } }, agent);
+  let turn = { hasHumanMessage: true };
+  const handlers = buildGoalHandlers({ ctx, agent, turnContext: () => turn });
+  ctx.agents.get = () => ({ ...agent });
+  assert.equal((await handlers.get_goal({})).isError, true);
+  ctx.agents.get = () => agent;
+  agent.status = "idle";
+  assert.equal((await handlers.get_goal({})).isError, true);
+  agent.status = "running";
+  turn = undefined;
+  assert.equal((await handlers.get_goal({})).isError, true);
+  assert.equal(reads, 0);
+});
+
+test("mod 工具定义提供严格 JSON schema，并拒绝错误类型/未知 action", async () => {
+  const definitions = goalToolDefinitions();
+  assert.deepEqual(definitions.map((definition) => definition.name), ["get_goal", "create_goal", "update_goal"]);
+  for (const definition of definitions) {
+    assert.equal(definition.inputSchema.type, "object");
+    assert.equal(definition.inputSchema.additionalProperties, false);
+  }
+  assert.deepEqual(definitions[2].inputSchema.properties.action.enum, ["edit", "pause", "resume", "complete", "blocked"]);
+  const goals = { get: () => activeGoal, create: () => { throw new Error("must not create"); }, block: () => { throw new Error("must not block"); } };
+  const handlers = buildGoalHandlers({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn });
+  for (const args of [{ objective: 42 }, { objective: "x", max_goal_rounds: 0 }, { objective: "x", max_goal_rounds: Number.MAX_SAFE_INTEGER + 1 }]) {
+    assert.equal((await handlers.create_goal(args)).isError, true);
+  }
+  assert.equal((await handlers.update_goal({ goal_id: "g1", revision: 2, action: "invalid" })).isError, true);
 });
 
 // ---------------------------------------------------------------------------

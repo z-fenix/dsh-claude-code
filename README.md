@@ -18,11 +18,12 @@
 - **🎯 一键接入 Claude Code**：声明一个 `claude-code` agent 预设 + 一个引擎，选中它，会话就交给本机 Claude Code CLI，零配置自动对上。
 - **📡 轨迹实时可见**：文本、思考、工具调用与结果，每一步都实时流进 DSH 会话（`agent/assistant-stream` 实时帧 + `assistant/message` 落盘）。
 - **📊 上下文占用可见**：把 Claude Code 的 token 用量与模型上下文窗口写进会话日志（`assistant/message.usage` + `request/context`），像 DSH 原生一样显示上下文占用与构成。
-- **🔐 权限桥接**：DSH 的沙箱模式 + 审批策略映射到 Claude 的 `canUseTool`（工作区内写放行、区外弹 DSH 审批）；`AskUserQuestion` 用 DSH 的选择题 UI 作答。
-- **🧰 预设自带完整工具目录**：预设的 `plugins` 列表就是该会话的工具目录来源，所以 `claude-code` 预设声明了与 DSH 自带 `standard` 预设等价的工具集（文件、搜索、shell、子代理、网络…），只把人设换成 Claude Code。**预设里省掉工具行 = 会话没有任何读写工具**，模型只能回答“我读不了文件”。
+- **🔐 权限桥接**：DSH 的模式和审批策略映射到 Claude 的 `canUseTool`；仅 `workspace-write` 的工作区内 `blockedPath` 可自动放行，其他需要权限的调用按策略处理。`AskUserQuestion` 用 DSH 的选择题 UI 作答。这不是 DSH 操作系统沙箱。
+- **🧰 Claude 自带执行循环**：选中插件引擎时，实际工具、人设和上下文来自 Claude Code；DSH 预设工具行不会自动桥接到 Claude。预设仍负责路由和 DSH 侧服务组合。
 - **⏯️ 精确续接**：Claude 会话 id 旁路持久化，重启后续聊接回**同一个** Claude 会话。
-- **🌐 子代理照旧 DeepSeek**：不管主会话选了谁，子代理都走原生循环。
-- **🧩 可扩展**：引擎注册表暴露为 `ctx.claudeCodeEngines`，别的插件可以注册自己的引擎，复用同一套「预设 → 引擎」路由与空白会话内切换。
+- **🌐 子代理轨迹**：Claude 内建 `Agent` / `Task` 子代理映射成 one-shot 只读子会话，显示短任务标签和真实运行状态；provider 保留在描述符里，没有合法人类消息来源时不伪造自动标题。原生 DSH 委派仍由宿主原生循环负责。
+- **⌨️ 运行中输入**：普通 followup 排队到下一轮，steer 进入活查询，inject 不自行启动查询；显式取消先请求 SDK interrupt，再关闭查询。保留原始消息来源、图片和投递台账。
+- **🧩 按能力加载 mods**：随包的 `dsh-bridge` mod 只加载到当前 Claude 子进程；可观察 prompt.compose、可选适配 goal 工具。不改全局插件设置，不修改 DSH 宿主包。
 - **🎯 目标式自动任务**：选中 Claude Code 预设的会话支持标准模式那套 goal —— 输入 `/goal <目标>` 后自动一轮轮推进，Claude 用桥接的 `get_goal`/`update_goal` 读取并把目标收尾（complete/blocked）。开关 `engines.claude-code.goal.enabled`，默认开。
 
 ## 🚀 安装
@@ -41,7 +42,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 > 标签，两份副本 = 两个 Symbol）。DSH 只在链接安装下把这类包重定向到宿主 `app.asar` 里的实例；
 > `file:` 会把检出复制进 profile 并连带装上一份 `dsh-scope` 副本，结果是新建/恢复会话都失败：
 > `Agent preset binding requires a scoped context`。详见 [安装指南](docs/guides/setup.md)。
-> 链接安装的附带好处：改本仓库源码立即生效，无需重装。
+> 链接安装无需重装；修改源码后重启桌面应用，让已加载的插件模块更新。
 
 > 也可以在桌面端的「设置 → 插件」里用插件管理器安装：`install_bundle` 指向本目录的绝对路径。
 
@@ -63,8 +64,12 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
         persistSession: true
         includePartialMessages: true
         traceSubagents: true
+        mods:
+          enabled: true                  # 按实际 CLI 的离线能力检查启用捕获
+          handshakeTimeoutMs: 8000       # 输入提交前的 mod 注册握手超时
         goal:
           enabled: true                    # 默认开：把 goal 工具桥接进 Claude Code
+          transport: mcp                   # mcp（默认）/ mod / auto；失败保留 MCP
           blockedAfterConsecutiveRounds: 3 # 同一阻塞条件连续多少轮才允许标记 blocked
           # defaultMaxGoalRounds: 256      # 可选：模型未给 max_goal_rounds 时的兜底
         env: {}                          # 例如 { ANTHROPIC_API_KEY: sk-... }
@@ -84,6 +89,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | `engines.claude-code.traceSubagents` | `true` | Claude 内部子代理映射成独立只读子会话 |
 | `engines.claude-code.env` | `{}` | 追加给 claude 子进程的环境变量 |
 | `engines.claude-code.contextWindow` | 未配置 | 手动指定上下文窗口（token 数） |
+| `engines.claude-code.mods.enabled` | `true` | 用所选 CLI 的 `plugin validate/test` 检查捕获能力，仅对子进程加载随包 mod |
+| `engines.claude-code.mods.handshakeTimeoutMs` | `8000` | 输入提交前的就绪握手超时，范围 1–30000 毫秒；失败另建 MCP 查询，不重复发送输入 |
+| `engines.claude-code.goal.transport` | `mcp` | `mcp` 保持兼容；`mod`/`auto` 在 mod 可用时选择 mod，否则回 MCP；一次查询不重复暴露两套 goal 工具 |
 | `engines.claude-code.goal.enabled` | `true` | 是否把 `get_goal`/`create_goal`/`update_goal` 桥接进 Claude Code（会话可用 `/goal` 自动推进） |
 | `engines.claude-code.goal.blockedAfterConsecutiveRounds` | `3` | 同一阻塞条件连续达到多少个 goal round 才允许模型标记 `blocked` |
 | `engines.claude-code.goal.defaultMaxGoalRounds` | 未配置 | 模型调 `create_goal` 未给上限时的兜底轮数（默认走 DSH 的 256） |
@@ -95,10 +103,12 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - **只有本插件引擎的会话被接管，其余整条委托回原工厂**。新建会话按 `meta.agentPreset` 路由，resume 先读持久化日志反推预设（空白期切过预设的会话必须按日志而不是 header 判断）；只要解析结果不是本插件引擎，`createAgent`/`resume` 都直接转交 `@deepseek-ai/dsh-agent-loop`。
   为什么不让原生会话也走自己的实现：AgentLoop 的建会话链路包含 `ownership.trackWrapper` → `setupAndPublish`（`raceAbort(options.setup)` + `interruptedTurnClosers` + `appendUnstoredSuffix`）→ `raceAbortCall` → owner/ownership 融合信号与失败回滚，每一步都参与它的生命周期记账。复刻其中一段会把原生会话换成残缺实现——实测表现为**会话文件建好、header 写入，之后再无任何事件，既打不开也发不出消息**，而 Claude Code 会话因为走另一条路径反而正常。
   代价：原生会话不再登记 record/handle，因此**不能**在空白会话内原地切到本插件引擎——宿主（dsh-agent-preset-registry）的预设切换是「原地重挂组合」，会把 Claude Code 预设挂到原生 Agent 上并向 UI 报告成功，但真正的引擎接管要等下次 resume（重启 / 重新打开会话）时按持久化日志判定；本插件会话切回 standard 则会**当场**用原工厂的 prepare() 换回原生循环，无需重建会话。
-- **轨迹映射**：`request/header`（模型 + 工具表，供上下文构成投影）→ 每个 Claude assistant 消息一个 `step`（`step/start` → `assistant/message`（含 `stream` 与 `usage`）→ `tool/call` → `tool/result` → `step/end`）→ `request/context`（上下文窗口）。
+- **轨迹映射**：`request/header` 只记录模型与工具表；同一 API 响应中共享 `message.id` 的 assistant 分块合并成一个 `step`，再配对真实工具结果。只有确实缺失结果时才补兜底错误，不把并行工具分块误判为中断。`request/context` 记录上下文窗口。
 - **休眠 LLM 路由**：`claude-code` 注册进 `ctx.llm` 但从不转发请求，只为让前端模型选择认为该 provider「已被服务」——否则首轮之后输入框会自锁。
 
 ## ⚠️ 已知限制
+
+- **审批桥不等于 DSH 的执行沙箱**。Claude 内建工具不经过 DSH 的文件系统/进程执行器；`read-only` 不享有工作区内自动写许可，需要权限的调用仍受审批策略约束，但这不构成与 standard 等价的操作系统级隔离。只有 `workspace-write` 的区内 `blockedPath` 可以自动放行，`never` 本身不会授予写权限。
 
 - **预设的 `plugins` 列表就是会话的工具目录**。`@deepseek-ai/dsh-agent-preset` 把这里声明的行挂进 agent scope，会话能看到哪些工具完全由它决定；预设只写一行 persona，会话就一个工具都没有。本插件因此照搬 DSH 自带 `standard` 预设的工具集（`dsh-web-app` 的 `presets/standard.patch.yml`），只替换 persona 行。改预设时务必用宿主自己的 schema 校验，并保留 `test/cordis.patch.test.mjs` 里的回归护栏。
 - **预设绝不能重复声明 host plane 已注册的工具**。`@deepseek-ai/dsh-tools` 的 `tools.register()` 先注册到全局、再注册到 agent 作用域，**同层同名直接抛错**：
@@ -113,15 +123,24 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - 预设同时也是**路由键**：只有路由到本插件引擎时，会话才由 Claude Code CLI 驱动；此时 Claude 用自带工具与默认人设，预设里的工具行不影响它（它们服务于原生循环那条路径）。
 - 会话一旦发出第一条消息就锁定预设（DSH 的规则），不能再切引擎。
 - Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂主循环、不可续跑。为了让面板显示正确的运行状态，每个子会话另挂一个**只做状态载体的被动 Agent**（不驱动模型、不消费输入；面板的「正在运行／已完成／当前未运行」只认宿主注册表里的 Agent 状态）。
-- 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时退化为重放。
+- 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时可能新建 Claude 会话，不能保证恢复原模型历史，也不等于 DSH fork 真正继承上下文。
+- **系统提示词仅捕获观察快照**：`claude-code/prompt-snapshot` 标记为 `observed-compose`、`partial`、`compositionLoop: unattributed`。其他 mods 可能继续改写，捕获点也无法证明只属于主循环；目前不写原生 `system/message`，不冒充轨迹中的最终完整系统提示词。
+- **提交不等于消费**：SDK 回显只是 acknowledgment；运行中人类输入须有匹配结果 UUID 的消费证据才提升 goal 权威。未确认输入记为 `uncertain`，不自动重发；`keepInbox` 保留未提交待办及可恢复 reservation，不能保证收回已交付输入。首批/运行中输入在 dequeue 前保存原队列，提交使用原子批次事实；steer 意图跨重启保留，旧 next-step 不猜测为 querying。
+- 捕获失败通过脱敏 SDK 诊断记录 `capture-disabled` 并告警，不改变 prompt 或 goal adapter；共享能力探测的调用者可独立取消，不影响其他活跃调用者。
+- **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
+- mod 检查失败或握手超时会记录 `claude-code/mod-status` 并保留 MCP。实测所选 CLI **2.1.296** 通过；SDK 附带 **2.1.220** 不支持本 mod 的 hooks 格式。插件不会自动升级 CLI。
+- 模型/effort 转发、真正的 fork 历史继承、实际 Claude compaction、DSH skills/persona/present/jobs、可续跑子代理和丰富工具结果仍属于后续阶段；第一期不宣称与 standard 全功能等价。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
 
 ## 🧪 开发
 
 ```sh
 pnpm install
-pnpm test        # 163 个用例：待办队列 / 权限映射 / 轨迹映射 / 子代理生命周期 / 路由判定 / patch 校验 / apply 接线 / goal 桥接
+pnpm test        # 队列 / 权限 / 轨迹 / 子代理 / 路由 / goal / mods / prompt / 输入控制回归
 ```
+
+第一期的输入语义、mods 配置、离线校验与限制见 [交互与桥接指南](docs/guides/interaction-and-mods.md)。
+CLI 的 `plugin validate` / `plugin test` 不调用模型；真实桌面/推理测试需单独确认预算。
 
 ## 📄 许可证
 
