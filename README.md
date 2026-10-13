@@ -134,7 +134,8 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - 捕获失败通过脱敏 SDK 诊断记录 `capture-disabled` 并告警，不改变 prompt 或 goal adapter；共享能力探测的调用者可独立取消，不影响其他活跃调用者。
 - **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
 - mod 检查失败或握手超时会记录 `claude-code/mod-status` 并保留 MCP。实测所选 CLI **2.1.296** 通过；SDK 附带 **2.1.220** 不支持本 mod 的 hooks 格式。插件不会自动升级 CLI。
-- 模型/effort 转发、实际 Claude compaction、DSH skills/persona/present/jobs、可续跑子代理和丰富工具结果仍属于后续阶段；第一期不宣称与 standard 全功能等价。
+- **子代理保持 one-shot，不能从这里续聊**。SDK 的控制请求里没有「给子代理发消息 / 恢复子代理」这一项；CLI 的 `SendMessage` 是**模型手里的工具**，插件无法代为调用。唯一的非模型通道是 mod 钩 `SubagentStop` 在子代理收尾时喂一段反馈——那是「再推它一把」，不是「点开子会话接着聊」。结构上子代理活在**父查询进程内**，父查询一结束转录只能读、不能对话。因此目录里**保持 `mode: "one-shot"`**，不为界面把 mode 改成看起来能继续。详见 `docs/superpowers/specs/2026-10-13-continuable-subagent-design.md`。
+- DSH skills/persona/present/jobs 的工具桥仍属于后续阶段；第一期不宣称与 standard 全功能等价。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
 
 ## 🧪 开发
