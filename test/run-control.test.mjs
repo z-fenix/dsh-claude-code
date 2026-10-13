@@ -303,6 +303,57 @@ test("取消期间的新 followup 唤醒新运行，但 keepInbox 本身不自�
   } finally { onQuery = undefined; active?.finish(); await agent.dispose(); }
 });
 
+test("取消保留待办后，仍在队列里的人类输入自动开始新回合", async () => {
+  active = undefined;
+  const ctx = new Context();
+  ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
+  const s = session();
+  const agent = new ClaudeCodeAgent(ctx, "s1", {}, s, { traceSubagents: false });
+  agent.followup(message("first"));
+  while (!active) await Promise.resolve();
+  const fake = active;
+  await fake.first;
+  const next = Promise.withResolvers();
+  onQuery = next.resolve;
+  try {
+    // 运行中排队一条普通人类消息，然后显式打断并保留队列。
+    agent.followup(message("queued-human"));
+    agent.cancel({ kind: "user" }, { keepInbox: true });
+    await agent.whenIdle();
+    // 保留的待办必须在取消收尾后自动续跑；没续跑时用有界等待失败，而不是永久挂起。
+    const started = await Promise.race([
+      next.promise.then(() => true),
+      new Promise((resolve) => { setTimeout(() => resolve(false), 2000); }),
+    ]);
+    assert.equal(started, true, "保留的待办应自动开一条新回合");
+    const second = await next.promise;
+    await second.first;
+    assert.equal(second.input[0].uuid, "queued-human", "保留的待办应自动开一条新回合");
+    assert.deepEqual(agent.inbox.nextTurn, []);
+    second.finish();
+    await agent.whenIdle();
+  } finally { onQuery = undefined; active?.finish(); await agent.dispose(); }
+});
+
+test("取消保留待办后，纯 inject 待办不自动建立回合", async () => {
+  active = undefined;
+  const ctx = new Context();
+  ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
+  const agent = new ClaudeCodeAgent(ctx, "s1", {}, session(), { traceSubagents: false });
+  agent.followup(message("first"));
+  while (!active) await Promise.resolve();
+  const fake = active;
+  await fake.first;
+  try {
+    agent.inject(message("notice", "system"));
+    agent.cancel({ kind: "user" }, { keepInbox: true });
+    await agent.whenIdle();
+    assert.equal(agent.status, "idle", "只有 inject 时不应自动开回合");
+    assert.equal(active, fake, "不得创建新查询");
+    assert.deepEqual(agent.inbox.nextStep.map((item) => item.id), ["notice"], "待办仍保留");
+  } finally { fake.finish(); await agent.dispose(); }
+});
+
 test("真实 Agent：goal 回合的 human steer 只有消费证据后才影响权威", async () => {
   const { agent, s } = makeAgent();
   agent.followup(message("goal-round", "goal"));
