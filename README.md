@@ -108,7 +108,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 ## ⚠️ 已知限制
 
-- **审批桥不等于 DSH 的执行沙箱**。Claude 内建工具不经过 DSH 的文件系统/进程执行器；`read-only` 不享有工作区内自动写许可，需要权限的调用仍受审批策略约束，但这不构成与 standard 等价的操作系统级隔离。只有 `workspace-write` 的区内 `blockedPath` 可以自动放行，`never` 本身不会授予写权限。
+- **审批桥不等于 DSH 的执行沙箱，但 `read-only` 的写限制会自己落地**。Claude 内建工具不经过 DSH 的文件系统/进程执行器，DSH 文件沙箱的 `writableRoots` 对它们无效，所以插件按 sandbox mode 自己补一层：`read-only` 下 `Write` / `Edit` / `MultiEdit` / `NotebookEdit` **一律拒绝**，不弹审批——不给「批准一次就放行」的口子（standard 会话在 read-only 下无论怎么批准都改不了文件）。`workspace-write` 下工作区内的 `blockedPath` 可自动放行，`never` 本身不授予写权限，Full access 维持既有交互。**残余边界**：`Bash` 是否写文件无法静态判定，仍走审批，因此这仍不构成与 standard 等价的**操作系统级**隔离。
+
+- **不派发宿主 `agent/pre-step`**。那是原生循环装配 prompt 的管线（工作区指令、时间快照、plan-mode 段落、DSH 侧自动压缩都在这一步改写装配结果），而本插件的 prompt 由插件自己生成、真正发出的请求由 Claude Code CLI 装配——DSH 的装配结果从不上网。照搬会让工作区指令被注入两遍（CLI 本来就会加载），并让压缩/段落作用于模型看不到的节点。代价：goal 轮没有宿主的 revision fence（排队后、开始前目标被改的窗口内那一轮不会被拒），goal 轮也不按「独立请求序列」渲染请求头。论证与监听器清单见 `docs/superpowers/specs/2026-10-13-agent-pre-step-design.md`。
 
 - **预设的 `plugins` 列表就是会话的工具目录**。`@deepseek-ai/dsh-agent-preset` 把这里声明的行挂进 agent scope，会话能看到哪些工具完全由它决定；预设只写一行 persona，会话就一个工具都没有。本插件因此照搬 DSH 自带 `standard` 预设的工具集（`dsh-web-app` 的 `presets/standard.patch.yml`），只替换 persona 行。改预设时务必用宿主自己的 schema 校验，并保留 `test/cordis.patch.test.mjs` 里的回归护栏。
 - **预设绝不能重复声明 host plane 已注册的工具**。`@deepseek-ai/dsh-tools` 的 `tools.register()` 先注册到全局、再注册到 agent 作用域，**同层同名直接抛错**：
@@ -125,7 +127,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂主循环、不可续跑。为了让面板显示正确的运行状态，每个子会话另挂一个**只做状态载体的被动 Agent**（不驱动模型、不消费输入；面板的「正在运行／已完成／当前未运行」只认宿主注册表里的 Agent 状态）。
 - 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时可能新建 Claude 会话，不能保证恢复原模型历史，也不等于 DSH fork 真正继承上下文。
 - **系统提示词仅捕获观察快照**：`claude-code/prompt-snapshot` 标记为 `observed-compose`、`partial`、`compositionLoop: unattributed`。其他 mods 可能继续改写，捕获点也无法证明只属于主循环；目前不写原生 `system/message`，不冒充轨迹中的最终完整系统提示词。
-- **提交不等于消费**：SDK 回显只是 acknowledgment；运行中人类输入须有匹配结果 UUID 的消费证据才提升 goal 权威。未确认输入记为 `uncertain`，不自动重发；`keepInbox` 保留未提交待办及可恢复 reservation，不能保证收回已交付输入。首批/运行中输入在 dequeue 前保存原队列，提交使用原子批次事实；steer 意图跨重启保留，旧 next-step 不猜测为 querying。
+- **提交不等于消费**：SDK 回显只是 acknowledgment；运行中人类输入须有匹配结果 UUID 的消费证据才提升 goal 权威。未确认输入记为 `uncertain`，不自动重发；`keepInbox` 保留未提交待办及可恢复 reservation，不能保证收回已交付输入。首批/运行中输入在 dequeue 前保存原队列，提交使用原子批次事实；steer 意图跨重启保留，旧 next-step 不猜测为 querying。显式停止收尾后，仍留在队列里、能自己成回合的待办（排队的 followup 或带 querying 意图的 steer）**会自动开始新回合**；纯 inject 仍不建立回合。
 - 捕获失败通过脱敏 SDK 诊断记录 `capture-disabled` 并告警，不改变 prompt 或 goal adapter；共享能力探测的调用者可独立取消，不影响其他活跃调用者。
 - **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
 - mod 检查失败或握手超时会记录 `claude-code/mod-status` 并保留 MCP。实测所选 CLI **2.1.296** 通过；SDK 附带 **2.1.220** 不支持本 mod 的 hooks 格式。插件不会自动升级 CLI。
