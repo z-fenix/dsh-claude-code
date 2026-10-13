@@ -150,10 +150,10 @@ test("read-only + never 不因 blockedPath 在工作区内而放行写入", asyn
   assert.equal(result.behavior, "deny");
 });
 
-test("read-only + ask 的工作区写入仍需用户审批", async () => {
+test("read-only + ask 的工作区写入被直接拒绝，不给「批准一次就放行」的口子", async () => {
   const requests = [];
   const canUseTool = makeCanUseTool({ get: (key) => key === "approval" ? {
-    request: async (request) => { requests.push(request); return "denied"; },
+    request: async (request) => { requests.push(request); return "allowed-once"; },
   } : undefined }, {
     cwd: "/w",
     session: sessionWith([ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "ask" })]),
@@ -161,8 +161,10 @@ test("read-only + ask 的工作区写入仍需用户审批", async () => {
   });
   const result = await canUseTool("Write", { file_path: "/w/a.txt" }, { blockedPath: "/w/a.txt" });
   assert.equal(result.behavior, "deny");
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].toolName, "Write");
+  // standard 会话在 read-only 下无论怎么批准都改不了文件（DSH 文件沙箱的 writableRoots 为空），
+  // 所以这里也不该把决定权交给一次审批。
+  assert.equal(requests.length, 0);
+  assert.match(result.message, /read-only/);
 });
 
 test("workspace-write 的区内路径可放行，切成 read-only 后下一调用立即拒绝", async () => {
@@ -195,4 +197,61 @@ test("goal 桥接工具在 no-prompt（never）下仍放行，且早于策略短
   assert.equal((await canUseTool(GOAL_TOOL_PREFIX + "unknown", {})).behavior, "deny");
   // 非 goal 的 MCP 工具不受此放行影响
   assert.equal((await canUseTool("mcp__other__x", {})).behavior, "deny");
+});
+
+// --- read-only 文件沙箱对齐（第二期） ---
+// standard 会话由 DSH 的文件沙箱兜底：read-only 下任何写操作都改不了文件（dsh-fs-sandbox 的
+// writableRoots 为空）。Claude Code 模式的文件工具是 CLI 自带的，**不经过** DSH 的 fs/sandbox，
+// 所以插件必须自己把这条限制落到 canUseTool 上；能力不足（Bash 无法静态判定是否写文件）时
+// 只能拒绝或保留审批，不能声称与 standard 等价的 OS 沙箱。
+
+test("read-only：工作区内的写工具被拒绝，不因路径落在工作区而放行", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "ask" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("Write", { file_path: "/w/a.txt" }, { blockedPath: "/w/a.txt" });
+  assert.equal(result.behavior, "deny");
+  assert.match(result.message, /read-only/);
+  assert.match(result.message, /workspace-write|full access/);
+});
+
+test("read-only：一次审批不能把写限制变成可写（不弹审批）", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined) };
+  const canUseTool = makeCanUseTool(ctx, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("Edit", { file_path: "/w/a.txt" });
+  assert.equal(result.behavior, "deny");
+  assert.equal(approvals.length, 0, "read-only 的写限制不能被批准一次就绕过");
+});
+
+test("read-only：Bash 仍走审批 seam（命令是否写文件无法静态判定）", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined) };
+  const canUseTool = makeCanUseTool(ctx, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("Bash", { command: "echo hi" });
+  assert.equal(approvals.length, 1);
+  assert.equal(result.behavior, "allow");
+});
+
+test("workspace-write：工作区内写仍直接放行（既有行为不变）", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "workspace-write" })]),
+    agent: { id: "a1" },
+  });
+  assert.deepEqual(await canUseTool("Write", { file_path: "/w/a.txt" }, { blockedPath: "/w/a.txt" }), { behavior: "allow" });
 });
