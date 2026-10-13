@@ -127,6 +127,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂主循环、不可续跑。为了让面板显示正确的运行状态，每个子会话另挂一个**只做状态载体的被动 Agent**（不驱动模型、不消费输入；面板的「正在运行／已完成／当前未运行」只认宿主注册表里的 Agent 状态）。
 - 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时可能新建 Claude 会话，不能保证恢复原模型历史，也不等于 DSH fork 真正继承上下文。
 - **系统提示词仅捕获观察快照**：`claude-code/prompt-snapshot` 标记为 `observed-compose`、`partial`、`compositionLoop: unattributed`。其他 mods 可能继续改写，捕获点也无法证明只属于主循环；目前不写原生 `system/message`，不冒充轨迹中的最终完整系统提示词。
+- **会话里选的模型与推理档位现在会真正生效**。插件折叠最后一条 `model/selection`，把 `model` / `effort` 透传给 SDK 查询——此前模型只来自 CLI 自己的 env/settings，前端换模型等于没换。SDK 不认识的推理档位不会被猜测或强行映射。因此模型必须是本机 Claude CLI 能服务的 id。
 - **提交不等于消费**：SDK 回显只是 acknowledgment；运行中人类输入须有匹配结果 UUID 的消费证据才提升 goal 权威。未确认输入记为 `uncertain`，不自动重发；`keepInbox` 保留未提交待办及可恢复 reservation，不能保证收回已交付输入。首批/运行中输入在 dequeue 前保存原队列，提交使用原子批次事实；steer 意图跨重启保留，旧 next-step 不猜测为 querying。显式停止收尾后，仍留在队列里、能自己成回合的待办（排队的 followup 或带 querying 意图的 steer）**会自动开始新回合**；纯 inject 仍不建立回合。
 - 捕获失败通过脱敏 SDK 诊断记录 `capture-disabled` 并告警，不改变 prompt 或 goal adapter；共享能力探测的调用者可独立取消，不影响其他活跃调用者。
 - **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
