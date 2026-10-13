@@ -112,6 +112,8 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 - **不派发宿主 `agent/pre-step`**。那是原生循环装配 prompt 的管线（工作区指令、时间快照、plan-mode 段落、DSH 侧自动压缩都在这一步改写装配结果），而本插件的 prompt 由插件自己生成、真正发出的请求由 Claude Code CLI 装配——DSH 的装配结果从不上网。照搬会让工作区指令被注入两遍（CLI 本来就会加载），并让压缩/段落作用于模型看不到的节点。代价：goal 轮没有宿主的 revision fence（排队后、开始前目标被改的窗口内那一轮不会被拒），goal 轮也不按「独立请求序列」渲染请求头。论证与监听器清单见 `docs/superpowers/specs/2026-10-13-agent-pre-step-design.md`。
 
+- **`/compact` 改不了 Claude 的真实上下文**。DSH 的 `/compact` 走 `ctx.compaction.compactNow`，压的是 DSH 会话日志的 surface 节点；Claude 的真实上下文在 CLI 进程里，由 CLI 自己按阈值压缩。插件**无法**触发 CLI 的压缩：SDK 的控制请求里没有 compact，而 CLI 自己触发时用的内部 `isMeta` 标记也不在 `SDKUserMessage` 上（实测把 `/compact` 当普通消息提交只会得到一轮零 step 的空回合）。所以 Claude Code 会话里按 `/compact` 只影响 DSH 显示面；长会话的自动压缩由 CLI 负责，代理不支持压缩请求时会以 `unrecognized_model … "query_source":"compact"` 硬失败并打挂整轮。详见 `docs/superpowers/specs/2026-10-13-claude-compaction-design.md`。
+
 - **预设的 `plugins` 列表就是会话的工具目录**。`@deepseek-ai/dsh-agent-preset` 把这里声明的行挂进 agent scope，会话能看到哪些工具完全由它决定；预设只写一行 persona，会话就一个工具都没有。本插件因此照搬 DSH 自带 `standard` 预设的工具集（`dsh-web-app` 的 `presets/standard.patch.yml`），只替换 persona 行。改预设时务必用宿主自己的 schema 校验，并保留 `test/cordis.patch.test.mjs` 里的回归护栏。
 - **预设绝不能重复声明 host plane 已注册的工具**。`@deepseek-ai/dsh-tools` 的 `tools.register()` 先注册到全局、再注册到 agent 作用域，**同层同名直接抛错**：
 
