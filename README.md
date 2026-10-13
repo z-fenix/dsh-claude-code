@@ -135,7 +135,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
 - mod 检查失败或握手超时会记录 `claude-code/mod-status` 并保留 MCP。实测所选 CLI **2.1.296** 通过；SDK 附带 **2.1.220** 不支持本 mod 的 hooks 格式。插件不会自动升级 CLI。
 - **子代理保持 one-shot，不能从这里续聊**。SDK 的控制请求里没有「给子代理发消息 / 恢复子代理」这一项；CLI 的 `SendMessage` 是**模型手里的工具**，插件无法代为调用。唯一的非模型通道是 mod 钩 `SubagentStop` 在子代理收尾时喂一段反馈——那是「再推它一把」，不是「点开子会话接着聊」。结构上子代理活在**父查询进程内**，父查询一结束转录只能读、不能对话。因此目录里**保持 `mode: "one-shot"`**，不为界面把 mode 改成看起来能继续。详见 `docs/superpowers/specs/2026-10-13-continuable-subagent-design.md`。
-- DSH skills/persona/present/jobs 的工具桥仍属于后续阶段；第一期不宣称与 standard 全功能等价。
+- **DSH 工具桥尚未接入**。把 DSH 侧的工具（`present`、`jobs`、动态插件工具）桥进 Claude 会话在机制上可行——`ctx.tools` 的 `schemas(scope)` / `execute(exec)` 就是宿主认可的接缝，本插件也已有受限本机桥与 MCP/mod 两条注册通道；但还差两件必须真机核对的事：**白名单范围**（每个桥进来的工具都会变成模型可调用的动作）与 **JSON Schema → SDK Zod 的方言转换**（SDK 的 `tool()` 要 Zod raw shape，mod 的 `$.tool.register` 要 JSON Schema）。默认不开启。设计与风险见 `docs/superpowers/specs/2026-10-14-dsh-tool-bridge-design.md`。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
 
 ## 🧪 开发
