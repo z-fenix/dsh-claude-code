@@ -34,7 +34,7 @@ step 与首轮 step 同属一个回合（不伪造 `user/message`）。
 | `stream_event` `content_block_delta`（input_json） | — | 同上，`tool-call-delta` |
 | `stream_event` `message_delta` | — | 本条消息的权威用量，落在随后那条 `assistant/message` 的 `usage` 上 |
 | `assistant` | `assistant/message`（+ `tool/call` ×N） | content 走块映射；工具调用另写 `tool/call` 供卡片渲染 |
-| `user`（tool_result） | `tool/result` | 按 callId 配对；早到结果等待所属响应完成，未知/重复回执不写；`AskUserQuestion` 的结果不标 `isError` |
+| `user`（tool_result） | `tool/result` | 按 callId 配对；早到结果等待所属响应完成，未知/重复回执不写；`AskUserQuestion` 的结果不标 `isError`。消息上带 `tool_use_result`（SDK 给的工具完整 Output 对象）时写进 `data.meta`；这条消息里工具结果不止一个就不写，避免猜错归属，不可序列化或超过 16 KiB 也不写 |
 | 本地 querying 意图 / reservation / 提交 / 回显 / 结果 UUID | `claude-code/input-intent`、`claude-code/input`、`claude-code/input-batch`、`claude-code/input-receipt` | 持久意图、逐消息台账、原子批次提交边界和 receipt；回显仅代表收到，匹配 success 结果才证明消费 |
 | mod `prompt.compose` | `claude-code/prompt-snapshot` | 有序 sections、model、digest、epoch；source=observed-compose、completeness=partial、compositionLoop=unattributed |
 | mod 能力 / 启动握手 / 当前 mod 的固定 `system/ui_log` 失效通知 | `claude-code/mod-status` | ready / fallback / unsupported / capture-disabled；精确 goal transport 与捕获状态，不含令牌或桥接地址；失效不改 composition 或 goal adapter |

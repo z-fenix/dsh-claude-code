@@ -603,3 +603,61 @@ test("TodoWrite 入参缺 todos 数组时不写 todo/write（不落垃圾事件�
   assert.equal(sink.types().includes("todo/write"), false);
   assert.equal(sink.types().includes("tool/call"), true, "tool/call 卡片照常写");
 });
+
+// --- 结构化工具产物（SDK 的 tool_use_result → DSH 的 tool/result.data.meta） ---
+// SDK 明确说 tool_use_result 是工具的完整 Output 对象（Agent/Task 甚至带 run totals），
+// 应该从它渲染而不是去解析 tool_result 文本。原生循环把工具的 result.meta 写进
+// `tool/result.data.meta`，本插件此前把它整块丢掉。
+function toolRoundTrip(tracer, userId, usermessage) {
+  tracer.handleMessage({ type: "system", subtype: "init", session_id: "c1", model: "m", tools: ["Read"] });
+  tracer.handleMessage({ type: "assistant", message: { id: "m1", content: [{ type: "tool_use", id: userId, name: "Read", input: { file_path: "/w/a.txt" } }] } });
+  tracer.handleMessage({ type: "user", ...usermessage });
+  tracer.finish();
+}
+
+test("带 tool_use_result 的工具结果把结构化产物写进 data.meta", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  toolRoundTrip(tracer, "t1", {
+    tool_use_result: { file: { filePath: "/w/a.txt", numLines: 2 } },
+    message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "a\nb" }] },
+  });
+  const result = sink.events.find((event) => event.type === "tool/result");
+  assert.deepEqual(result.data.meta, { file: { filePath: "/w/a.txt", numLines: 2 } });
+  assert.equal(result.data.message.content[0].text, "a\nb", "文本内容不受影响");
+});
+
+test("一条消息里多个工具结果时不猜 meta 归属", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  tracer.handleMessage({ type: "system", subtype: "init", session_id: "c1", model: "m", tools: ["Read"] });
+  tracer.handleMessage({ type: "assistant", message: { id: "m1", content: [
+    { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/w/a" } },
+    { type: "tool_use", id: "t2", name: "Read", input: { file_path: "/w/b" } },
+  ] } });
+  tracer.handleMessage({ type: "user", tool_use_result: { ambiguous: true }, message: { content: [
+    { type: "tool_result", tool_use_id: "t1", content: "a" },
+    { type: "tool_result", tool_use_id: "t2", content: "b" },
+  ] } });
+  tracer.finish();
+  const results = sink.events.filter((event) => event.type === "tool/result");
+  assert.equal(results.length, 2);
+  assert.equal(results[0].data.meta, undefined);
+  assert.equal(results[1].data.meta, undefined);
+});
+
+test("无法序列化或过大的 tool_use_result 不写 meta（不崩、不膨胀日志）", () => {
+  const circular = { name: "root" };
+  circular.self = circular;
+  for (const [label, value] of [["circular", circular], ["huge", { blob: "x".repeat(200000) }]]) {
+    const sink = fakeSink();
+    const tracer = new ClaudeRunTracer(sink, 1);
+    toolRoundTrip(tracer, "t1", {
+      tool_use_result: value,
+      message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+    });
+    const result = sink.events.find((event) => event.type === "tool/result");
+    assert.equal(result.data.meta, undefined, `${label} 不写入 meta`);
+    assert.equal(result.data.message.content[0].text, "ok", `${label} 仍保留文本结果`);
+  }
+});
