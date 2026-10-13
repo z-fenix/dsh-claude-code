@@ -19,6 +19,7 @@ import { EngineRouter } from "./lib/router.mjs";
 import { ClaudeCodeAgent } from "./lib/agent.mjs";
 import { CLAUDE_CODE_PROVIDER, ClaudeCodeLlmRoute } from "./lib/llm-route.mjs";
 import { load as loadClaudeSessionId } from "./lib/store.mjs";
+import { forkResumeHint } from "./lib/fork.mjs";
 
 export const name = "dsh-claude-code";
 
@@ -103,8 +104,16 @@ export const claudeCodeEngine = {
       mods: { ...ENGINE_DEFAULTS.mods, ...engineConfig?.mods },
     };
     const machine = new ClaudeCodeAgent(loopCtx, id, options, session, config);
-    // resume 路径：把上一进程捕获的 Claude 会话 id 读回来，首轮即续接同一个 Claude 会话。
+    // resume / fork 路径：把上次捕获的 Claude 会话 id 读回来，首轮即续接同一个 Claude 会话。
+    // DSH fork 出来的会话自己还没有 Claude 会话，此时承**父**的 id 并把父转录分叉过来
+    // （`resume` + `forkSession`），否则分叉出来的会话等于失忆。见 lib/fork.mjs。
     machine.loadResumeState = async () => {
+      const hint = await forkResumeHint({ sessionId: id, header: session.header, load: loadClaudeSessionId });
+      if (hint !== undefined) {
+        machine.pendingResume = hint.claudeSessionId;
+        machine.forkOnResume = hint.fork;
+        return;
+      }
       const existing = await loadClaudeSessionId(id);
       if (existing !== undefined) machine.pendingResume = existing;
     };
