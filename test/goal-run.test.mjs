@@ -1,6 +1,15 @@
 // test/goal-run.test.mjs — runClaudeCode 对 goal 桥接的 options 组装。
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// 私有事实库按 session id 落盘，默认根目录是用户真实的 `~/.dsh/dsh-claude-code`。
+// 测试必须改写根目录：否则这里会用 id "s1" 在用户的真实库里建文件，而同一个 id 一旦
+// 配到不同事件上，下一次真实读写就会撞上「journal is corrupt or its session anchor
+// does not match」。必须在 import claude-run 之前设置（模块加载期就会用到）。
+process.env.DSH_CLAUDE_CODE_STORE = mkdtempSync(join(tmpdir(), "dsh-cc-goal-run-"));
 
 let capturedOptions = [];
 mock.module("@anthropic-ai/claude-agent-sdk", {
