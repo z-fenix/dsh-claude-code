@@ -10,6 +10,7 @@ import {
   contextWindowOf,
   isZeroUsage,
   isSubagentMessage,
+  compactObservation,
 } from "../lib/claude-run.mjs";
 
 /** 假会话 sink：记录事件、可回放 requestHeader / requestContext。 */
@@ -660,4 +661,34 @@ test("无法序列化或过大的 tool_use_result 不写 meta（不崩、不膨�
     assert.equal(result.data.meta, undefined, `${label} 不写入 meta`);
     assert.equal(result.data.message.content[0].text, "ok", `${label} 仍保留文本结果`);
   }
+});
+
+// --- CLI 自己的上下文压缩：记成可审计事实 ---
+// 原生事件里没有「压缩」这种类型（DSH 的 compaction 事件由 BasicCompactionEngine 按 checkpoint
+// 契约写，插件伪造会破坏日志），所以只能记插件私有事实。CLI 会上报压缩边界，以及成功/失败，
+// 失败时还带 compact_error —— 长会话在这里出问题时至少是看得见的。
+test("compact_boundary 归一成可审计事实（含前后 token 与耗时）", () => {
+  assert.deepEqual(
+    compactObservation({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 180000, post_tokens: 12000, duration_ms: 4210 } }),
+    { kind: "boundary", trigger: "auto", preTokens: 180000, postTokens: 12000, durationMs: 4210 },
+  );
+  assert.deepEqual(compactObservation({ type: "system", subtype: "compact_boundary" }), { kind: "boundary" });
+});
+
+test("压缩的开始与结果（含失败原因）各自成事实", () => {
+  assert.deepEqual(compactObservation({ type: "system", subtype: "status", status: "compacting" }), { kind: "started" });
+  assert.deepEqual(compactObservation({ type: "system", subtype: "status", status: null, compact_result: "success" }), { kind: "settled", result: "success" });
+  assert.deepEqual(
+    compactObservation({ type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: "unrecognized_model" }),
+    { kind: "settled", result: "failed", error: "unrecognized_model" },
+  );
+});
+
+test("与压缩无关的系统消息不产生事实", () => {
+  for (const message of [
+    { type: "system", subtype: "status", status: "requesting" },
+    { type: "system", subtype: "init", session_id: "c1" },
+    { type: "assistant", message: {} },
+    undefined,
+  ]) assert.equal(compactObservation(message), undefined);
 });

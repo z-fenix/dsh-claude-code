@@ -38,6 +38,7 @@ step 与首轮 step 同属一个回合（不伪造 `user/message`）。
 | 本地 querying 意图 / reservation / 提交 / 回显 / 结果 UUID | `claude-code/input-intent`、`claude-code/input`、`claude-code/input-batch`、`claude-code/input-receipt` | 持久意图、逐消息台账、原子批次提交边界和 receipt；回显仅代表收到，匹配 success 结果才证明消费 |
 | mod `prompt.compose` | `claude-code/prompt-snapshot` | 有序 sections、model、digest、epoch；source=observed-compose、completeness=partial、compositionLoop=unattributed |
 | mod 能力 / 启动握手 / 当前 mod 的固定 `system/ui_log` 失效通知 | `claude-code/mod-status` | ready / fallback / unsupported / capture-disabled；精确 goal transport 与捕获状态，不含令牌或桥接地址；失效不改 composition 或 goal adapter |
+| CLI 自己的上下文压缩（`system/compact_boundary` / `system/status`） | `claude-code/compact` | `kind: boundary` 带 trigger / 前后 token / 耗时；`kind: started` 与 `kind: settled` 带 `result` 与失败原因 `error`。DSH 的 compaction 事件属于宿主 checkpoint 契约，插件不伪造 |
 | `result` | `request/context` | 写模型上下文窗口（`modelUsage` 取不到时用配置兜底）；并收掉当前 step——**不结束 run**（后台子代理的续跑随后继续写进同一回合的新 step） |
 | `system/task_*`、带 `parent_tool_use_id` 的消息 | 子会话事件 | 开启子代理追踪时归位到独立子会话；关闭时丢弃 |
 
