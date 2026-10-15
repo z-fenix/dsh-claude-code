@@ -240,6 +240,15 @@ goal: {
    **已知差异**：原生把该上下文注册为会话可见 notice（source `tool-goal` / form `notice`），
    本版挂在工具结果里，因此 transcript 中不会另有一条 notice 气泡。
 5. **`hasHumanMessage` 是近似**：仅证明本回合由人类直接发起，不判断目标是否「足够重大」。
+6. **宿主服务只能用 `ctx.get(name)` 取，不能当属性读（2026-10-15 实测踩中）。** 宿主 ctx 是
+   cordis 代理：插件 `inject` 清单（`agents`/`sessions`/`sessionPersistence`）之外的服务，
+   属性访问抛 `cannot get property "goals" without inject`。`7585f7d` 的 admission guard
+   用 `loopCtx.goals.get` 读目标，该抛错被 `assessGoalAdmission` 吞成 `hold`/`goal-read-failed`，
+   于是每个 goal round 被永久暂挂、agent 空闲、宿主驱动器随即暂停目标（现场表现为
+   「目标创建后 0 回合、11ms 后被暂停」）。已改为 `loopCtx.get?.("goals")`（同
+   `lib/goal-domain.mjs`）。**测试盲区**：`wireGoalFixture` 在裸 `new Context()` 上 `provide`，
+   属性访问不受 inject 限制，所以只有包裹代理的用例（`test/agent.test.mjs`「宿主不把 goals
+   暴露成 ctx 属性时…」）能复现。新增任何对宿主服务的读取都必须走 `ctx.get`。
 
 ## 9. 交付物
 

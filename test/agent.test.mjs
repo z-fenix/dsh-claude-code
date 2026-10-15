@@ -170,7 +170,21 @@ const human = { id: "human", role: "user", source: { kind: "user" }, content: [{
 const injected = { id: "context", role: "user", source: { kind: "system" }, content: [{ type: "text", text: "CONTEXT" }] };
 const entry = (message, target = "next-turn", querying = true) => ({ message, target, querying });
 const countNative = (session, id) => session.events.filter(e => e.type === "user/message" && e.data.id === id).length;
-async function driveBatch(entries, { view, attachments, onNativeEvent, onClaim, onCreated } = {}) {
+/**
+ * 宿主 ctx 的 cordis 语义：插件 `inject` 之外的服务**不能当属性读**，属性访问按
+ * cordis 的 get trap 抛错（node_modules/@deepseek-ai/cordis/lib/index.js：
+ * `cannot get property "${prop}" without inject`）。裸 `new Context()` 里 property
+ * 访问不受此限制，所以只有包裹后才能复现真实宿主的行为。
+ */
+function hostLikeCtx(ctx, hidden) {
+  return new Proxy(ctx, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && hidden.includes(prop)) throw new Error(`cannot get property "${prop}" without inject`);
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+async function driveBatch(entries, { view, attachments, onNativeEvent, onClaim, onCreated, hiddenServices } = {}) {
   const timeline = [];
   const ctx = new Context();
   let agent;
@@ -181,7 +195,7 @@ async function driveBatch(entries, { view, attachments, onNativeEvent, onClaim, 
     goal.onNativeEvent(event);
     onNativeEvent?.(event, { goal, agent });
   });
-  agent = new ClaudeCodeAgent(ctx, "agent-1", {}, session, { traceSubagents: false });
+  agent = new ClaudeCodeAgent(hiddenServices ? hostLikeCtx(ctx, hiddenServices) : ctx, "agent-1", {}, session, { traceSubagents: false });
   Object.assign(agent.dispatch, fakeDispatch(timeline));
   agent.dispatch.emit = (name, payload) => {
     timeline.push(`dispatch:${name}`);
@@ -208,6 +222,15 @@ test("旧 revision 混合批只准备 querying human", async () => {
 test("合法 goal 只登记一次且计数仅在 native admission 推进", async () => {
   const { session, goal } = await driveBatch([entry(automatic)]);
   assert.equal(countNative(session, automatic.id), 1);
+  assert.equal(runCalls.length, 1);
+  assert.equal(goal.view.roundsStarted, 1);
+});
+test("宿主不把 goals 暴露成 ctx 属性时，goal round 仍读得到目标并入场", async () => {
+  // 真实宿主实测：goal round 被无限 hold（admission=hold goal-read-failed，
+  // error=cannot get property "goals" without inject），目标始终不消耗轮次，
+  // 宿主驱动器随即把目标暂停。goal 服务只能用 ctx.get("goals") 取（同 lib/goal-domain.mjs）。
+  const { session, goal } = await driveBatch([entry(automatic)], { hiddenServices: ["goals"] });
+  assert.equal(countNative(session, automatic.id), 1, "合法 goal round 必须登记 native user/message");
   assert.equal(runCalls.length, 1);
   assert.equal(goal.view.roundsStarted, 1);
 });
