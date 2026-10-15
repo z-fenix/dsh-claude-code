@@ -138,8 +138,22 @@ SDK `system/ui_log` 发送一次固定脱敏诊断；宿主记录 `claude-code/m
 `pnpm test` 覆盖输入、审批、goal、mod host、prompt、轨迹和路由；native v4 校验离线验证事件关系。
 真实桌面/模型调用没有纳入离线通过声明，需单独批准预算。链接安装修改后重启 DSH 重新加载源码。
 
-后续第二期：真实 DSH 沙箱路由、fork 历史继承、模型/effort 转发、实际 Claude compact。
-后续第三期：**宿主 persona 段落已按项桥接（`lib/host-persona.mjs`，2026-10-15）**；其余 scope-aware
-skills/runtime/present/jobs/工具桥、可续跑子代理/workflow、丰富工具结果/图片、非 Git 编辑前捕获和真实
-context 分项仍在后续。其中 **skills 不是 prompt 段落而是 DSH 的 `skill` 工具**，补齐属新工具桥条目、
-需单独审计批准。未经各期审批，不自动扩大第一期实现范围。
+第二、三期**已交付**的部分：宿主 persona 段落按项桥接（`lib/host-persona.mjs`）、DSH fork 继承
+Claude 历史（`forkSession`）、会话所选模型/effort 真正转发、工具结果里的图片落成附件引用
+（`lib/tool-result-images.mjs`，只有「轨迹」视图画图）、Claude 文件工具补派发进宿主
+`tools/pre-execute`（`lib/host-tool-gate.mjs`，非 Git 工作区也能出改动卡片）、scope-aware 工具桥
+（默认关闭，仅 `present` / `job_*` 白名单）、SDK 沙箱透传 + `read-only` 硬拒绝。
+
+**仍未交付的三项，卡在宿主/CLI 一侧**（不是插件没写，也不是「以后再说」）：
+
+| 项 | 卡在哪 | 谁能解开 |
+|---|---|---|
+| 实际 Claude compact（DSH `/compact` 压不到 CLI 的真实上下文） | SDK 控制请求里有 interrupt / 权限 / 模型，**没有 compact**；CLI 自触发压缩用的内部 `isMeta` 标记不是 `SDKUserMessage` 的字段 | Claude Agent SDK / CLI 暴露压缩请求，或允许插件注入该标记 |
+| 可续跑子代理 / workflow | 子代理活在**父查询进程内**，父查询结束转录只读；SDK 没有「给子代理发消息 / 恢复子代理」的控制请求，CLI 的 `SendMessage` 是**模型手里的工具** | Claude Code 暴露子代理会话地址，或允许父进程代发消息 |
+| DSH 面板里的真实 context 分项 | 分项是宿主自己的启发式估计；Claude 的真实分项只存在于 CLI 进程内，插件没有写入通道 | DSH 开放分项注入 seam，或 SDK 上报分类用量 |
+
+同一类边界还有一条：`read-only` 的写限制与 SDK 沙箱透传已落地，但「让 Claude 的工具走 DSH 的文件/
+进程执行器」需要宿主把 CLI 的执行纳入自己的执行器，属宿主侧改造。
+
+**插件刻意不做的一项**：skills 不是 prompt 段落而是 DSH 的 `skill` 工具，补齐属新工具桥条目、需单独
+审计批准（见 README 的工具桥白名单）。未经各期审批，不自动扩大实现范围。
