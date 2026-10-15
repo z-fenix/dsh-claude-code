@@ -9,6 +9,15 @@
 //      AskUserQuestion 从工具表里摘掉（"disabled for this session"）。
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// runClaudeCode 每轮都会写一条 `claude-code/host-persona` 私有事实，而事实库按 session id
+// 落在 `DSH_CLAUDE_CODE_STORE`（默认是用户真实的 `~/.dsh/dsh-claude-code`）。这里的桩会话用
+// id "s1"/"s2"，不隔离就会在用户的真实库里建文件，并撞上同一个 id 遗留的写锁
+// （private facts writer conflict）。必须在 import claude-run 之前设置。
+process.env.DSH_CLAUDE_CODE_STORE = mkdtempSync(join(tmpdir(), "dsh-cc-approval-"));
 
 // --- 模块 mock：捕获 runClaudeCode 交给 SDK query 的 options（不拉起真实 claude CLI）---
 let capturedOptions = [];

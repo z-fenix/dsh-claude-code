@@ -26,7 +26,15 @@ export const name = "dsh-claude-code";
 // 只声明真正必须的服务：agents 是接管槽位的对象，sessions / sessionPersistence 供自造
 // 会话与持久化使用。agentPresets、subprocess、approval、userQuestions、user-approval 一律
 // 用 ctx.get() 宽松读取——它们是可选协作者，缺了要降级而不是让插件加载失败。
-export const inject = ["agents", "sessions", "sessionPersistence"];
+//
+// `tools` 是例外，它不是本插件要用的工具表，而是**宿主 agent-scope 断言的通行证**：
+// 宿主的 `dsh-file-reference-local` 在 agent scope 注册 `context:file-reference`，其 text
+// 回调写的是 `agent.ctx.tools.get("read", agent)`（**属性**访问）。cordis 里属性访问能不能过
+// 由 fiber 的 inject 声明决定，而 `SystemPrompt.assemble()` 求值段落时不做逐段隔离——于是
+// 这一段抛错会让**整次装配**失败，persona 跟着一起读不到，安静地什么都不转发。
+// 2026-10-15 隔离实例实测：`ctx.get("tools")` 与 `agent.ctx.get("tools")` 都是 object，
+// 而 `ctx.tools` 与 `agent.ctx.tools` 都是 `cannot get property "tools" without inject`。
+export const inject = ["agents", "sessions", "sessionPersistence", "tools"];
 
 /** 引擎 id；同时是预设 id（by-id 路由的锚点）。 */
 export const CLAUDE_CODE_ENGINE_ID = "claude-code";

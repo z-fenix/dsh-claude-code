@@ -139,5 +139,7 @@ SDK `system/ui_log` 发送一次固定脱敏诊断；宿主记录 `claude-code/m
 真实桌面/模型调用没有纳入离线通过声明，需单独批准预算。链接安装修改后重启 DSH 重新加载源码。
 
 后续第二期：真实 DSH 沙箱路由、fork 历史继承、模型/effort 转发、实际 Claude compact。
-后续第三期：scope-aware skills/persona/runtime/present/jobs/工具桥、可续跑子代理/workflow、丰富工具结果/
-图片、非 Git 编辑前捕获和真实 context 分项。未经各期审批，不自动扩大第一期实现范围。
+后续第三期：**宿主 persona 段落已按项桥接（`lib/host-persona.mjs`，2026-10-15）**；其余 scope-aware
+skills/runtime/present/jobs/工具桥、可续跑子代理/workflow、丰富工具结果/图片、非 Git 编辑前捕获和真实
+context 分项仍在后续。其中 **skills 不是 prompt 段落而是 DSH 的 `skill` 工具**，补齐属新工具桥条目、
+需单独审计批准。未经各期审批，不自动扩大第一期实现范围。

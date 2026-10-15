@@ -71,7 +71,26 @@ return { ...decision, assembly };
 - **不要**为了「补齐契约」而派发 `agent/pre-step`：那会把 DSH 的装配管线接到一个它不拥有的
   prompt 上，产生重复指令与分叉状态。
 - 若将来确实要把某项 DSH 上下文带给 Claude，应**按项显式桥接**（明确格式与去重），
-  而不是整体打开 waterfall。
+  而不是整体打开 waterfall。**2026-10-15 已按这条路线落地第一项**：宿主 persona 两段
+  （`deployment:persona-prefix/suffix`）由 `lib/host-persona.mjs` 取来、插值后追加进 CLI preset；
+  工具段落与 runtime 上下文明确不转发（理由见 `2026-10-14-dsh-tool-bridge-design.md` §六之二）。
+
+  **这条桥有两个必须记住的边界**（2026-10-15 隔离实例实测，证据见
+  `.dsh-diag/live-verify-2026-10-15/acceptance-persona.md`）：
+
+  1. **`assemble()` 没有逐段隔离，一段抛错会带走整次装配。** 宿主
+     `@deepseek-ai/dsh-file-reference-local` 在 agent scope 注册的 `context:file-reference`，
+     其 text 回调按**属性**读 `agent.ctx.tools`；而 cordis 的属性访问能否通过由 fiber 的
+     `inject` 声明决定。插件原先只 inject `agents/sessions/sessionPersistence`，于是这一段
+     抛 `cannot get property "tools" without inject`，persona 跟着一起读不到，且完全静默。
+     因此 `index.mjs` 的 `inject` 必须带上 `"tools"`——不是本插件要用 DSH 工具表，
+     而是要让宿主 agent-scope 段落的属性访问合法。单测钉住这条声明；静默失效本身
+     由私有事实 `claude-code/host-persona`（`sections`/`chars`/`forwarded`/`reason`，不含正文）兜底。
+  2. **append 只在 Claude 会话的首个回合定型。** 已存在的 Claude 会话被 resume 时不会重新
+     采纳 append：同一实例里，修复前建立的会话在修复后仍答 CLI 自带身份
+     （`You are Claude Code, Anthropic's official CLI for Claude…`），而新会话对同一短语答 `YES`。
+     也就是说，persona 配置的变更只对新会话生效；这是 CLI 的会话系统提示词边界，
+     插件不绕过它（绕过等于牺牲会话续接）。
 - goal 修订栅栏若要补，只能在**回合起点**做一次等价校验（读 `ctx.get("goals")`，
   比照 driver 的 `validReservation` 条件：`id`、`revision`、`phase: active`、
   `activation: armed`、`source.round === roundsStarted + 1`）。这属于对宿主策略的复制，
