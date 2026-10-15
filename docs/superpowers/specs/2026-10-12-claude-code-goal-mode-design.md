@@ -21,7 +21,8 @@
 
 - 不重写 goal 领域、不新增第二套 goal 状态、不新增独立的续跑驱动器。
 - 不改变任何非 Claude Code 会话（原生循环）的行为。
-- 不处理标准模式本身；不实现 `dsh-tool-goal` 的 complete/blocked 收尾 `deferContext`（见 §8）。
+- 不处理标准模式本身；`dsh-tool-goal` 的 complete/blocked 收尾 `deferContext` 原不在本设计内，
+  已于 2026-10-15 作为对照修复补齐（见 §8.4）。
 - 不修复与本特性无关的既有问题（例如 AskUserQuestion 在 bypass 下的既有修复，属独立改动）。
 
 ## 2. 背景与现状（决定设计的实测事实）
@@ -232,8 +233,12 @@ goal: {
    是「能自动续跑」的前提，实现期第一步即验证。
 3. **KV cache / token 成本**：goal 工具 schema 常驻 + 策略提示，每次请求少量固定开销；
    关闭开关可消除。
-4. **收尾指令缺失**：`dsh-tool-goal` 在 complete/blocked 后 `deferContext` 一段收尾指令，
-   本版不做；依赖 `<goal_round>` 提示自带的「收尾前先核验」语义与工具结果。
+4. **收尾指令（原为缺口，2026-10-15 已补齐）**：`dsh-tool-goal` 在 complete/blocked 后
+   `deferContext` 一段收尾指令。现按同一文本补入 `lib/goal-domain.mjs`（`goalWrapupContext`），
+   与原生一样只在 `authority.kind === "goal-round"` 时附带，人类直接回合不带；
+   MCP 路径作为第二个 text 块随工具结果下发，mod 路径把两个块按换行拼接后交给模型。
+   **已知差异**：原生把该上下文注册为会话可见 notice（source `tool-goal` / form `notice`），
+   本版挂在工具结果里，因此 transcript 中不会另有一条 notice 气泡。
 5. **`hasHumanMessage` 是近似**：仅证明本回合由人类直接发起，不判断目标是否「足够重大」。
 
 ## 9. 交付物

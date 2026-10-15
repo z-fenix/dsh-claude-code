@@ -230,6 +230,57 @@ test("complete：goal round 内允许（goalSource 与当前 goal 精确匹配�
   assert.equal(value.goal.phase, "complete");
 });
 
+test("complete：goal round 内收尾 → 结果附带 <goal_complete> 收尾指令（对照 dsh-tool-goal 的 deferContext）", async () => {
+  // 宿主 dsh-tool-goal 在「自主轮次」成功后延后一条收尾指令，让模型在轮次结束前向用户交代一次；
+  // 人类直接变更绝不延后该上下文。本插件用工具结果的第二块承载同一指令。
+  const goal = { id: "g1", revision: 2, objective: "写一篇清单", phase: "active", roundsStarted: 1, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 1 } });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content.length, 2, "结果 = goal JSON + 收尾指令");
+  assert.equal(JSON.parse(result.content[0].text).goal.phase, "complete");
+  const wrapup = result.content[1].text;
+  assert.match(wrapup, /^<goal_complete>\n/);
+  assert.match(wrapup, /Objective: "写一篇清单"\n/);
+  assert.match(wrapup, /Write the closing message to the user now/);
+  assert.match(wrapup, /Do not call any more tools in this run/);
+  assert.match(wrapup, /<\/goal_complete>$/);
+});
+
+test("complete：人类直接回合 → 不附带收尾指令", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 1, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "complete" });
+  assert.equal(result.content.length, 1);
+  assert.equal(JSON.parse(result.content[0].text).goal.phase, "complete");
+});
+
+test("blocked：goal round 内收尾 → 附带 <goal_blocked> 并回显 blocked_reason", async () => {
+  const goal = { id: "g1", revision: 2, objective: "写一篇清单", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const turn = () => ({ hasHumanMessage: false, goalSource: { kind: "goal", goalId: "g1", revision: 2, round: 3 } });
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: turn, config: { blockedAfterConsecutiveRounds: 3 } });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "no access" });
+  assert.equal(result.content.length, 2);
+  const wrapup = result.content[1].text;
+  assert.match(wrapup, /^<goal_blocked>\n/);
+  assert.match(wrapup, /Blocked: "no access"\n/);
+  assert.match(wrapup, /say exactly what you need from the user to continue/);
+  assert.match(wrapup, /<\/goal_blocked>$/);
+});
+
+test("blocked：人类直接回合 → 不附带收尾指令", async () => {
+  const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 3, maxGoalRounds: 8, activation: "armed" };
+  const goals = fakeGoals2(goal);
+  const server = buildGoalServer({ ctx: fakeCtx(goals, runningAgent), agent: runningAgent, turnContext: humanTurn, config: {} });
+  const result = await toolOf(server, "update_goal").handler({ goal_id: "g1", revision: 2, action: "blocked", blocked_reason: "no access" });
+  assert.equal(result.content.length, 1);
+  assert.equal(JSON.parse(result.content[0].text).goal.phase, "blocked");
+});
+
 test("complete：既无人类回合也无匹配 goal round → 拒绝", async () => {
   const goal = { id: "g1", revision: 2, objective: "x", phase: "active", roundsStarted: 1, maxGoalRounds: 8, activation: "armed" };
   const goals = fakeGoals2(goal);

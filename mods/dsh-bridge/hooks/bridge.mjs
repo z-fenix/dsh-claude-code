@@ -69,7 +69,8 @@ export function register(on, options) {
     const result = await rpc($, bridge, claudeSessionId, `${bridge.epoch}-${++sequence}`, definition.name, params, e.agentId ?? null);
     const text = result.content.map((block) => block.text ?? "").join("\n");
     if (result.isError) return { deny: text };
-    JSON.parse(text);
+    // 领域 JSON 必须是首个文本块；收尾指令等后续文本块与它一同交给模型，不参与校验。
+    JSON.parse(result.content[0]?.text ?? "");
     return { result: text };
   }).catch(() => ({ deny: "DSH goal bridge failed closed." }));
 }
