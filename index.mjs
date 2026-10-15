@@ -53,6 +53,22 @@ const ENGINE_DEFAULTS = {
   env: {},
   /** 手动指定模型上下文窗口（token 数）；SDK 取不到时兜底。 */
   contextWindow: undefined,
+  /**
+   * read-only 会话里 `Bash` 的策略：`deny`（默认）直接拒绝，`ask` 退回「批准一次就放行」。
+   *
+   * `Bash` 一条命令是否写文件无法静态判定，所以 read-only 下不能像 `Write`/`Edit` 那样按名字精确拒绝。
+   * 默认 deny 的理由：Claude 的 Bash 不经过 DSH 文件沙箱，留审批口子等于把 read-only 降级成
+   * 「点一下就能写」。代价是 read-only 会话里连只读命令也用不了——要放宽必须显式配置。
+   */
+  readOnlyBash: "deny",
+  /**
+   * SDK 的 OS 级沙箱设置（`SandboxSettings`），原样透传给 `query()`；不配则完全不传。
+   *
+   * 这是本插件唯一能拿到的**真沙箱**，但它不是 DSH 沙箱：需要宿主系统有 bubblewrap（Linux）或
+   * sandbox-exec（macOS），Windows 上不生效。且 CLI 在真沙箱内可能自行放行而**不调 canUseTool**，
+   * 此时上面的 read-only 判定不适用（沙箱本身即是边界）。默认不传 = 行为与旧版一致。
+   */
+  sandbox: undefined,
   /** 按所选 CLI 的实际能力捕获 compose 快照，不改用户全局插件配置。 */
   mods: { enabled: true, handshakeTimeoutMs: 8000 },
   /**

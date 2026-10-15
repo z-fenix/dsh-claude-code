@@ -159,6 +159,57 @@ test("非 bypass 策略下同样把 canUseTool 交给 SDK", async () => {
   assert.equal(capturedOptions[0].permissionMode, undefined);
 });
 
+// --- read-only 的 Bash 策略 + SDK 沙箱透传（第二期 · 执行边界） ---
+// canUseTool 里能拿到 config.readOnlyBash，SDK options 里只在显式配置时才有 sandbox。
+
+const readOnlySession = (id) => ({
+  id,
+  append() {},
+  requestContext: () => undefined,
+  requestHeader: () => undefined,
+  snapshotEvents: () => [ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "ask" })],
+});
+
+const runReadOnly = async (id, config, ctx) => {
+  capturedOptions = [];
+  await runClaudeCode({
+    ctx, config, session: readOnlySession(id), agent: { id: "a1" },
+    turn: 1, prompt: "hi", signal: new AbortController().signal, cwd: "/w", executable: "claude", env: {},
+  });
+  return capturedOptions[0];
+};
+
+test("readOnlyBash 未配置时，交到 SDK 的 canUseTool 对 Bash 默认拒绝", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined), logger: { warn: () => {}, info: () => {} } };
+  const options = await runReadOnly("s3", {}, ctx);
+  const result = await options.canUseTool("Bash", { command: "rm -rf /w" }, {});
+  assert.equal(result.behavior, "deny");
+  assert.equal(approvals.length, 0);
+});
+
+test("readOnlyBash=ask 透传到 canUseTool：同一策略下 Bash 回到审批 seam", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined), logger: { warn: () => {}, info: () => {} } };
+  const options = await runReadOnly("s4", { readOnlyBash: "ask" }, ctx);
+  const result = await options.canUseTool("Bash", { command: "ls" }, {});
+  assert.equal(approvals.length, 1);
+  assert.equal(result.behavior, "allow");
+});
+
+test("sandbox 只在显式配置时透传给 SDK，且原样不动", async () => {
+  const sandbox = { enabled: true, autoAllowBashIfSandboxed: true, network: { allowUnixSockets: ["/tmp/x"] } };
+  const ctx = { get: () => undefined, logger: { warn: () => {}, info: () => {} } };
+  const configured = await runReadOnly("s5", { sandbox }, ctx);
+  assert.deepEqual(configured.sandbox, sandbox, "sandbox 必须原样透传，插件不解析也不改写");
+  const absent = await runReadOnly("s6", {}, ctx);
+  assert.equal("sandbox" in absent, false, "未配置时不能留一个 undefined 的键给 SDK");
+});
+
 test("read-only + never 不因 blockedPath 在工作区内而放行写入", async () => {
   const canUseTool = makeCanUseTool(baseCtx(undefined), {
     cwd: "/w",
@@ -251,7 +302,7 @@ test("read-only：一次审批不能把写限制变成可写（不弹审批）",
   assert.equal(approvals.length, 0, "read-only 的写限制不能被批准一次就绕过");
 });
 
-test("read-only：Bash 仍走审批 seam（命令是否写文件无法静态判定）", async () => {
+test("read-only：Bash 默认直接拒绝，且不弹审批（命令是否写文件无法静态判定）", async () => {
   const approvals = [];
   const ctx = { get: (key) => (key === "approval"
     ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
@@ -262,8 +313,41 @@ test("read-only：Bash 仍走审批 seam（命令是否写文件无法静态判�
     agent: { id: "a1" },
   });
   const result = await canUseTool("Bash", { command: "echo hi" });
+  assert.equal(result.behavior, "deny");
+  assert.equal(approvals.length, 0, "read-only 下的 Bash 不能被批准一次就绕过");
+  assert.match(result.message, /read-only/);
+  // 拒绝信息必须点名配置键，否则用户只看到「命令用不了」却不知道往哪改。
+  assert.match(result.message, /engines\.claude-code\.readOnlyBash/);
+});
+
+test("read-only：显式配 readOnlyBash=ask 才退回审批 seam", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined) };
+  const canUseTool = makeCanUseTool(ctx, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]),
+    agent: { id: "a1" },
+    readOnlyBash: "ask",
+  });
+  const result = await canUseTool("Bash", { command: "echo hi" });
   assert.equal(approvals.length, 1);
   assert.equal(result.behavior, "allow");
+  // 同一策略下，文件工具不受 readOnlyBash 影响：写限制不因放宽 Bash 而松动。
+  const write = await canUseTool("Write", { file_path: "/w/a.txt" }, { blockedPath: "/w/a.txt" });
+  assert.equal(write.behavior, "deny");
+});
+
+test("read-only：非 Bash 的其它命令工具不受影响（BashOutput 只读输出）", async () => {
+  const canUseTool = makeCanUseTool(baseCtx(undefined), {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" }), ev("approval/policy", { policy: "never" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("BashOutput", { bash_id: "b1" });
+  // 走的是 never 策略那条路（no-prompt → deny），而不是 read-only 的 Bash 拒绝。
+  assert.match(result.message, /approval policy/);
 });
 
 test("workspace-write：工作区内写仍直接放行（既有行为不变）", async () => {

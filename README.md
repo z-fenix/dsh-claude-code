@@ -18,7 +18,7 @@
 - **🎯 一键接入 Claude Code**：声明一个 `claude-code` agent 预设 + 一个引擎，选中它，会话就交给本机 Claude Code CLI，零配置自动对上。
 - **📡 轨迹实时可见**：文本、思考、工具调用与结果，每一步都实时流进 DSH 会话（`agent/assistant-stream` 实时帧 + `assistant/message` 落盘）。
 - **📊 上下文占用可见**：把 Claude Code 的 token 用量与模型上下文窗口写进会话日志（`assistant/message.usage` + `request/context`），像 DSH 原生一样显示上下文占用与构成。
-- **🔐 权限桥接**：DSH 的模式和审批策略映射到 Claude 的 `canUseTool`；仅 `workspace-write` 的工作区内 `blockedPath` 可自动放行，其他需要权限的调用按策略处理。`AskUserQuestion` 用 DSH 的选择题 UI 作答。这不是 DSH 操作系统沙箱。
+- **🔐 权限桥接**：DSH 的模式和审批策略映射到 Claude 的 `canUseTool`；仅 `workspace-write` 的工作区内 `blockedPath` 可自动放行，其他需要权限的调用按策略处理。`read-only` 下文件工具与 `Bash` 一律拒绝（见「已知限制」）。`AskUserQuestion` 用 DSH 的选择题 UI 作答。这不是 DSH 操作系统沙箱。
 - **🧰 Claude 自带执行循环**：选中插件引擎时，实际工具、人设和上下文来自 Claude Code；DSH 预设工具行不会自动桥接到 Claude。预设仍负责路由和 DSH 侧服务组合。
 - **⏯️ 精确续接**：Claude 会话 id 旁路持久化，重启后续聊接回**同一个** Claude 会话。
 - **🌐 子代理轨迹**：Claude 内建 `Agent` / `Task` 子代理映射成 one-shot 只读子会话，显示短任务标签和真实运行状态；provider 保留在描述符里，没有合法人类消息来源时不伪造自动标题。原生 DSH 委派仍由宿主原生循环负责。
@@ -77,6 +77,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
           # names: [present, job_list, job_output, job_kill] # 只能缩小这个审计白名单
         env: {}                          # 例如 { ANTHROPIC_API_KEY: sk-... }
         contextWindow: 200000            # 可选：SDK 取不到时兜底
+        readOnlyBash: deny               # read-only 下 Bash：deny（默认）/ ask（回到「批准一次就放行」）
+        # sandbox:                       # 可选：把 SDK 的 SandboxSettings 原样透传（Linux/macOS 才有真沙箱）
+        #   enabled: true
 ```
 
 | 键 | 默认 | 含义 |
@@ -92,6 +95,8 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | `engines.claude-code.traceSubagents` | `true` | Claude 内部子代理映射成独立只读子会话 |
 | `engines.claude-code.env` | `{}` | 追加给 claude 子进程的环境变量 |
 | `engines.claude-code.contextWindow` | 未配置 | 手动指定上下文窗口（token 数） |
+| `engines.claude-code.readOnlyBash` | `deny` | read-only 下 `Bash` 的策略：`deny` 直接拒绝（不弹审批）／`ask` 退回「批准一次就放行」 |
+| `engines.claude-code.sandbox` | 未配置 | 原样透传给 SDK `query()` 的 `SandboxSettings`；不配则完全不传。不是 DSH 沙箱，Windows 上不生效 |
 | `engines.claude-code.mods.enabled` | `true` | 用所选 CLI 的 `plugin validate/test` 检查捕获能力，仅对子进程加载随包 mod |
 | `engines.claude-code.mods.handshakeTimeoutMs` | `8000` | 输入提交前的就绪握手超时，范围 1–30000 毫秒；失败另建 MCP 查询，不重复发送输入 |
 | `engines.claude-code.goal.transport` | `mcp` | `mcp` 保持兼容；`mod`/`auto` 在 mod 可用时选择 mod，否则回 MCP；一次查询不重复暴露两套 goal 工具 |
@@ -113,7 +118,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 ## ⚠️ 已知限制
 
-- **审批桥不等于 DSH 的执行沙箱，但 `read-only` 的写限制会自己落地**。Claude 内建工具不经过 DSH 的文件系统/进程执行器，DSH 文件沙箱的 `writableRoots` 对它们无效，所以插件按 sandbox mode 自己补一层：`read-only` 下 `Write` / `Edit` / `MultiEdit` / `NotebookEdit` **一律拒绝**，不弹审批——不给「批准一次就放行」的口子（standard 会话在 read-only 下无论怎么批准都改不了文件）。`workspace-write` 下工作区内的 `blockedPath` 可自动放行，`never` 本身不授予写权限，Full access 维持既有交互。**残余边界**：`Bash` 是否写文件无法静态判定，仍走审批，因此这仍不构成与 standard 等价的**操作系统级**隔离。
+- **审批桥不等于 DSH 的执行沙箱，但 `read-only` 的写限制会自己落地**。Claude 内建工具不经过 DSH 的文件系统/进程执行器，DSH 文件沙箱的 `writableRoots` 对它们无效，所以插件按 sandbox mode 自己补一层：`read-only` 下 `Write` / `Edit` / `MultiEdit` / `NotebookEdit` **一律拒绝**，不弹审批——不给「批准一次就放行」的口子（standard 会话在 read-only 下无论怎么批准都改不了文件）。`workspace-write` 下工作区内的 `blockedPath` 可自动放行，`never` 本身不授予写权限，Full access 维持既有交互。**`read-only` 下的 `Bash` 同路：默认直接拒绝**，理由是「这条命令是否写文件」无法静态判定，而 Claude 的 `Bash` 没有 DSH 文件沙箱兜底，留审批口子等于把 read-only 降级成「点一下就能写」；代价是 read-only 会话里连 `ls` 也用不了——要恢复旧的「批准一次就放行」须显式设 `engines.claude-code.readOnlyBash: "ask"`。**残余边界（诚实说明）**：这仍**不构成与 standard 等价的 OS 级隔离**——插件只在 `canUseTool` 被调用时判定，而 Claude 的沙箱/权限机制可能不调用它（见下一条）。
+
+- **SDK 沙箱是唯一能拿到的真沙箱，但它不是 DSH 沙箱、也不是默认开的**。`engines.claude-code.sandbox` 会原样透传给 SDK 的 `sandbox`（`SandboxSettings`），不配则完全不传（行为与旧版一致）。三点必须知道：(1) 它依赖宿主系统能力——Linux 的 bubblewrap / macOS 的 `sandbox-exec`，Windows 上不生效；(2) 它约束的是 CLI 进程自己怎么执行，与 DSH 的 sandbox mode / fs 沙箱是两套互不联动的机制，插件不会拿它去推导 read-only，也不会因它放宽 read-only；(3) 命令在**真沙箱内**被 CLI 自行放行时，`canUseTool` 可能根本不被调用，此时上面的 read-only 判定不适用——那正是沙箱本身作为边界的场景。所以「配了 sandbox」不等于「read-only 更严」，两者是正交的。
 
 - **不派发宿主 `agent/pre-step`**。那是原生循环装配 prompt 的管线（工作区指令、时间快照、plan-mode 段落、DSH 侧自动压缩都在这一步改写装配结果），而本插件的 prompt 由插件自己生成、真正发出的请求由 Claude Code CLI 装配——DSH 的装配结果从不上网。照搬会让工作区指令被注入两遍（CLI 本来就会加载），并让压缩/段落作用于模型看不到的节点。代价：goal 轮仍没有 standard 的私有 reservation fence（插件侧有限准入保护见下文），goal 轮也不按「独立请求序列」渲染请求头。论证与监听器清单见 `docs/superpowers/specs/2026-10-13-agent-pre-step-design.md`。
 

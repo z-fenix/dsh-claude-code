@@ -30,6 +30,8 @@
             persistSession: true
             includePartialMessages: true
             traceSubagents: true
+            # read-only 会话里 `Bash` 的策略：deny（默认，直接拒绝、不弹审批）／ask（批准一次就放行）。
+            readOnlyBash: deny
             env: {}
 
 - insert:
