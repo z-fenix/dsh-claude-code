@@ -94,6 +94,7 @@ test("引擎默认启用按能力的捕获且 goal 默认 MCP，部分配置保�
     assert.equal(agent.config.mods.handshakeTimeoutMs, 25);
     assert.equal(agent.config.goal.transport, "mcp");
     assert.equal(agent.config.goal.blockedAfterConsecutiveRounds, 3);
+    assert.equal(agent.config.dshTools.enabled, false, "新工具能力须显式启用，不能改变既有会话默认权限面");
   } finally { await agent.dispose(); }
 });
 

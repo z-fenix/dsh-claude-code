@@ -72,6 +72,9 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
           transport: mcp                   # mcp（默认）/ mod / auto；失败保留 MCP
           blockedAfterConsecutiveRounds: 3 # 同一阻塞条件连续多少轮才允许标记 blocked
           # defaultMaxGoalRounds: 256      # 可选：模型未给 max_goal_rounds 时的兜底
+        dshTools:
+          enabled: false                 # 显式改 true 才桥接原生交付物 / jobs
+          # names: [present, job_list, job_output, job_kill] # 只能缩小这个审计白名单
         env: {}                          # 例如 { ANTHROPIC_API_KEY: sk-... }
         contextWindow: 200000            # 可选：SDK 取不到时兜底
 ```
@@ -95,6 +98,8 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | `engines.claude-code.goal.enabled` | `true` | 是否把 `get_goal`/`create_goal`/`update_goal` 桥接进 Claude Code（会话可用 `/goal` 自动推进） |
 | `engines.claude-code.goal.blockedAfterConsecutiveRounds` | `3` | 同一阻塞条件连续达到多少个 goal round 才允许模型标记 `blocked` |
 | `engines.claude-code.goal.defaultMaxGoalRounds` | 未配置 | 模型调 `create_goal` 未给上限时的兜底轮数（默认走 DSH 的 256） |
+| `engines.claude-code.dshTools.enabled` | `false` | 显式开启 scope-aware DSH 工具桥；与 goal 的 transport 独立 |
+| `engines.claude-code.dshTools.names` | `[present, job_list, job_output, job_kill]` | 仅可配置这个审计白名单的子集；空数组不注册 server，未知名字/非数组报错 |
 
 ## 🔍 原理（可选阅读）
 
@@ -124,7 +129,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
   实测踩过：本插件曾照搬 `standard` 预设，连它的 `delegation` 组一起抄了进来（`tool-subagent` 声明 `toolName: subagent` 等 6 行）。而 `@deepseek-ai/dsh-base` 已经在 host plane 注册了这些行（`dsh-web-app` 只是把它们在 host plane 上 `disabled`，语义是「委派工具由预设层选择」）。在同时存在其它委派工具来源的部署里（例如 `dsh-experimental-agent-team-profile`），预设再声明一次就撞名，后果是**所有会话都创建不出来**——不只是选中本预设的会话。
 
   因此本预设**刻意不含** `delegation` 组：`subagent` / `subagent_fork` / `interrupt_agent` / `list_agents` / `send_message` / `workflow` 都由 DSH 的 host plane 提供。`test/cordis.patch.test.mjs` 有一条护栏断言这 8 个 id 不得出现。
-- 预设同时也是**路由键**：只有路由到本插件引擎时，会话才由 Claude Code CLI 驱动；此时 Claude 用自带工具与默认人设，预设里的工具行不影响它（它们服务于原生循环那条路径）。
+- 预设同时也是**路由键**：只有路由到本插件引擎时，会话才由 Claude Code CLI 驱动；此时 Claude 用自带工具与默认人设。预设工具默认不转发；下述显式启用的工具桥只读取其中审计过的子集，不转发人设。
 - 会话一旦发出第一条消息就锁定预设（DSH 的规则），不能再切引擎。
 - Claude Code 内部子代理是**只读投影**：只映射成 lineage 树里的只读子会话展示轨迹，不挂主循环、不可续跑。为了让面板显示正确的运行状态，每个子会话另挂一个**只做状态载体的被动 Agent**（不驱动模型、不消费输入；面板的「正在运行／已完成／当前未运行」只认宿主注册表里的 Agent 状态）。
 - 精确续接依赖插件旁路持久化（`~/.dsh/dsh-claude-code/sessions.json`）；该文件丢失时可能新建 Claude 会话，不能保证恢复原模型历史。**DSH fork 会继承 Claude 的历史**：分叉会话以 `forkSession` 续接父的 Claude 会话，CLI 把转录复制到新会话 id——分叉出来的会话记得原来的对话，父会话不被续写。父会话还没有记录的 Claude 会话（或旁路库丢失）时，分叉按新建处理，不猜着接。

@@ -1,85 +1,125 @@
-# scope-aware DSH 工具桥：可行性、设计与风险
+# scope-aware DSH 工具桥：审计范围、实现与验收
 
-第三期最后一项「scope-aware DSH 工具桥（skills/persona/runtime sections、present、jobs、动态插件
-工具）」的调查。结论：**机制存在且是宿主认可的路径，可以落地**；但开放哪些工具给模型是能力决定，
-需要先定范围。调查对象是本机 DSH 0.2.0-rc.2（`resources/app.asar`）。
+用户已选定 **present + jobs**。本项通过 SDK MCP 桥接本机 DSH 0.2.0-rc.2 的原生工具，
+不修改宿主包、正式会话或全局 Claude 设置。第三期的 persona/runtime 提示词、动态工具及
+原生可续聊子代理不属于本项。
 
-## 一、可用的宿主接缝（都已核实）
+## 一、范围与配置
 
-`ctx.tools`（`@deepseek-ai/dsh-tools` 的 `ToolRuntime extends Service`）正好提供了桥接需要的三件事：
+桥接本身 **默认关闭**。显式开启后，默认名字为四个已审计工具：
 
-| 方法 | 用途 |
-|---|---|
-| `schemas(scope)` / `wireSchemas(scope)` | 按 agent scope 给出可见工具的模型面 schema：`{name, description, parameters}`（另有 `knownNames` 与 PTC 模式的 `run_code` 折叠） |
-| `get(name, scope)` / `resolveExecution(name, scope, nested)` | 取可见定义，并施加 PTC 模式的折叠规则 |
-| `execute(exec)` | 执行一次调用；`exec = { callId, name, arguments, agent, signal }`，返回**最终物化结果**（`finishScheduledExecution` → `materializeFinalResult`），中途经过 pre-execute / 调度 / post-execute 全套宿主管线 |
+```yaml
+engines:
+  claude-code:
+    dshTools:
+      enabled: true
+      names: [present, job_list, job_output, job_kill]
+```
 
-这与本插件**已有的两条路**衔接得上：`createSdkMcpServer` + `tool(...)`（goal 桥就是这么做的，见
-`lib/goal-bridge.mjs`）与随包发布的受限 mod（`$.tool.register` + `tool.call`，见 `mods/dsh-bridge`）。
+`names` 可以缩小这个集合；空数组不注册 server，非数组或未知名字使该轮报错并收尾，
+不能通过配置扩大到 `bash` 或其它工具。server 名为 `dsh`，模型名为 `mcp__dsh__<name>`。
+它独立于 goal 的 `mcp` / `mod` 选择；一次查询仍只使用一个 goal adapter。
 
-## 二、日志不变量：桥接是安全的（只要选对工具）
-
-DSH 的 surface event 只有五种消息类型（`system/developer/user/assistant/message`、`tool/result`），
-其余都是**log-only**。桥进来的工具如果自己 append 事件（例如 `present` 会 append
-`deliverables/presented`），只要是 log-only，在插件回合中途追加就是合法的——不触发
-`surfaceOp` 闸门，也不影响 Claude 的 step 结构。
-
-**但这条必须逐个工具核对**：任何会在回合中途写 surface 事件的工具，桥接后都可能把插件会话写坏
-（最坏结果是会话永久打不开）。所以桥接对象必须是**白名单**，不能按前缀或「全部可见工具」放行。
-
-## 三、权限模型
-
-桥进来的工具名会进入 `canUseTool`。放行范围必须**精确到名字**（与 goal 桥的 `GOAL_TOOL_NAMES`
-同一口径，不放行整段前缀）。被执行的是**DSH 侧的真实 handler**，它自带 DSH 的权限/审批语义
-（`tools/pre-execute` 等），因此这条路不会绕过宿主自己的门控。
-
-## 四、风险与边界
-
-1. **能力放大**：白名单里的每个工具都成为模型可调用的动作。像 `present` 这种只读 cwd + 写一条
-   log-only 事实的，风险低；带副作用（写文件、起进程、改配置）的必须逐个评估。
-2. **命名冲突**：Claude 自带 `bash/read/edit/glob/grep/web/todo/skill/subagent` 等。桥接 DSH 的同名
-   工具会得到两张脸（模型选谁不可控），所以**只桥 Claude 没有的**。
-3. **schema 方言**：DSH 的 `parameters` 是它自己的 JSON Schema 方言（属性级 `required: true`、
-   `additionalProperties` 等，见 `present` 的定义），`dsh-tools/lib/types/json-schema.js` 里有
-   `assertSupportedJsonSchema` / `assertObjectJsonSchema` 做校验。桥接时**必须用宿主自己的投影**
-   （`schemas(scope)`），不要手写转换——手写会随宿主方言漂移。
-4. **schema 方言**：DSH 的 `parameters` 是它自己的 JSON Schema 方言（属性级 `required: true`、
-   `additionalProperties` 等，见 `present` 的定义），`dsh-tools/lib/types/json-schema.js` 里有
-   `assertSupportedJsonSchema` / `assertObjectJsonSchema` 做校验。桥接时**必须用宿主自己的投影**
-   （`schemas(scope)`），不要手写转换——手写会随宿主方言漂移。
-5. **两条注册通道接受的 schema 形态不同**（这是本项剩下最硬的一块）：
-   - SDK 的 `createSdkMcpServer` + `tool(name, description, inputSchema, handler)` 要求
-     `inputSchema` 是 **Zod raw shape**（`tool<Schema extends AnyZodRawShape>`，见 `sdk.d.ts`），
-     而 DSH 给的是 JSON Schema 方言 —— 需要一次 **JSON Schema → Zod** 的转换（goal 桥之所以没这个
-     问题，是因为它的 schema 本来就用 zod 写、再用 `z.toJSONSchema` 出 JSON Schema）。
-   - mod 的 `$.tool.register({ inputSchema })` 接受 **JSON Schema**（现有 `mods/dsh-bridge` 正是把
-     `z.toJSONSchema(...)` 的结果直接递进去，native `plugin validate`/`plugin test` 已通过），
-     与 DSH 的方言更接近，但仍要核对属性级 `required: true` 这类方言糖能不能被 CLI 的注册校验接受。
-   **两条路各有一次方言核对，必须真机验证，不能靠推断。**
-6. **不该宣称的**：spec 明确「不宣称 standard 默认连接 MCP」。桥接是**插件自己起的**适配，不是
-   standard 的默认行为。
-
-## 五、建议的落地范围（待定）
-
-按「Claude 没有 + 风险低 + 用户可见」筛：
-
-| 候选 | 理由 | 风险 |
+| 工具 | 原生行为 | 边界 |
 |---|---|---|
-| `present` | Claude 无对等工具；只在 DSH UI 里登记交付物，append 的是 log-only 事件 | 低（只读 cwd 路径存在性 + 一条事实） |
-| `jobs` | DSH 后台任务面板的入口 | 中（起/停进程，需按 DSH 自身权限走） |
-| 动态插件工具 | 第三方挂进 agent scope 的工具 | 未知（取决于插件） |
+| `present` | 核对工作区的已有普通文件，经原生结果观察器登记 `deliverables/presented` | 需要有效 agent、open turn、cwd；交付事实关联真实调用 ID |
+| `job_list` | 列出当前 agent 有权访问的原生 jobs | 不把 CLI 后台任务伪装成 DSH job |
+| `job_output` | 消费原生 job 的输出；可按原生超时边界等待 | owner 由执行 agent 决定，不由参数指定 |
+| `job_kill` | 请求原生 job 取消 | 有副作用；跨会话由宿主拒绝，不暴露 job-start |
 
-`skills`/`persona`/`runtime` 属于**提示词截面**而不是工具：persona/runtime 段落由宿主的
-`agent/pre-step` 装配注入，而本插件不派发该事件（见
-`2026-10-13-agent-pre-step-design.md`），所以它们**不会**进 Claude 的请求——这部分要单独处理，
-不能靠工具桥解决。
+没有桥接 DSH fs/bash/grep/todo/skill、动态插件工具或其它 MCP 客户端/资源能力。
+结果适配仅返回已审计工具的 `content` 与 `isError`；不承诺任意工具的 `meta`、
+`additionalContexts`、`value`、`concludesTurn` 或图片/附件语义。
 
-**默认建议**：白名单默认**为空**（不改变现状），由配置显式开启；首个落地目标选 `present`，
-因为它的日志影响面已经核对干净、且用户可见。
+## 二、宿主与 SDK 接缝
 
-## 六、验证计划
+`ToolRuntime` 提供 `schemas(agent)`、`wireSchemas(agent)`、`get/resolveExecution` 和
+`execute({callId, name, arguments, agent, signal})`。后者经过原生 pre-execute 门控、
+调度、post-execute、结果物化及结果观察器；桥不直接调用裸 handler。
 
-- 单元：schema 取自 `ctx.tools.schemas(agent)`（不手写转换）；白名单过滤；放行精确到名字；
-  未在白名单的可见工具不注册。
-- 真机（隔离 web 实例）：让模型调用一次桥进来的 `present`，确认 ① 工具出现在 request/header
-  ② `deliverables/presented` 合法落盘 ③ 整条会话仍通过原生 v4 校验。
+优先使用 **`wireSchemas(agent).schemas`**；只有宿主没有这个方法时才兼容回退到
+`schemas(agent)`。PTC 模式的模型面只有 `run_code` 时不另开 MCP 入口，不能借
+`schemas` 中仍存在的底层定义绕过折叠。每次执行前同样重查可见性。
+
+DSH `defineTool` 在注册时已经把属性级 `required` DSL 转成标准 JSON Schema；
+桥选择器保留宿主投影，不自行编写方言转换。SDK 0.3.220 的 `tool()` **不能直接接受
+JSON Schema**，但能接受完整 Zod schema；实际实现是 `z.fromJSONSchema(inputSchema)`。
+只取 raw shape 会丢掉对象级约束，所以转换完整对象。真实 SDK 回归覆盖嵌套 required、
+optional、`additionalProperties: false`、无参 `job_list` 及无效参数不执行。
+
+## 三、调用身份、权限与生命周期
+
+实际 CLI 2.1.296 在 MCP 请求 `_meta["claudecode/toolUseId"]` 里携带 assistant 的
+`tool_use.id`；SDK 把 `_meta` 交给 handler 的 extra。桥将这个 ID 传给宿主执行。
+**JSON-RPC requestId 和随机 UUID 不能替代它**，否则交付事实虽然可通过字段校验，
+却不能关联轨迹中的真实调用。缺失或空身份元数据一律拒绝执行。
+
+这个 extra 元数据是已观察并测试的运行时契约，不是完整的类型层保证；不支持该契约的
+CLI 不会获得静默降级的调用身份。广告及轨迹保留 `mcp__dsh__*` 名，宿主执行使用原生名。
+
+**父 agent 桥仅允许主查询调用**。runner 先区分 child 消息，再将主 assistant 消息写入
+轨迹；日志仍完整时才向桥确认同一个 tool-use ID 和精确工具名。child 消息即使被关闭的
+子代理投影丢弃，也只登记为拒绝，不能使用父 cwd、交付会话或 jobs owner。桥自身同样
+拒绝非空 `parent_tool_use_id`，不依赖调用参数中的自报身份。子代理仍是 one-shot，未实现
+原生 child-scope 工具桥。
+
+MCP 请求可能先到，最多等待 5 秒取得归属证据；超时、查询/请求取消或 close 均失败并
+清理等待器。证据到达后再次核对 agent 对象、running、工具可见性和查询状态，然后才
+进入原生执行。ID/名字冲突不升级为主调用，不为 unknown caller 默认选择父 scope。
+
+`canUseTool` 仅自动允许当前查询实际注册的精确名字，不允许整段前缀。原生 `execute`
+仍承担自己的权限与 owner 门控；这不为 Claude 内建工具增加 OS 沙箱。旧的
+`goalToolNames` 参数仍兼容，新 `allowedToolNames` 参数优先。
+
+每次调用核对：查询未关闭、查询和请求信号未取消、registry 中仍是同一个 agent 对象、
+agent 仍为 running、工具仍可见。查询/request 信号融合后交给宿主。runner 在 finally
+关闭桥；schema/配置错误也在 try/finally 内收尾，不能遗留 abort listener 或旧 handler。
+原生工具域错误保留 `isError`；意外宿主异常只返回脱敏错误，不给模型异常栈或凭据。
+
+## 四、日志不变量
+
+**log-only 不是任意事件可安全追加的证明**。本次只审计四个工具的行为与必需字段。
+`present` 的原生观察器在有效 turn 下追加 `deliverables/presented`，其 callId 必须是
+真实 CLI ID。jobs 的结果通过已有工具轨迹投影；其原生完成通知仍可能进入 owner inbox，
+不能宣称这些工具永不影响会话。没有把 persona/runtime 的宿主 prompt 装配搬进 CLI。
+
+每条广告/assistant/tool-call 的名字与调用身份仍须匹配；工具结果要真实配对，不能靠
+合成缺失结果补丁掩盖桥错误。完整 session 必须通过原生行准入及 released-v4 关系校验。
+
+## 五、验收记录（2026-10-14）
+
+- 单元与真实 SDK：精确 allowlist、schema 校验、真实调用 ID、缺失身份、取消、关闭、
+  agent 替换、工具移除、PTC 折叠、无服务/无可见工具、不扩大配置。
+- runner：查询结束后旧 handler 即使 agent 仍 running 也不可执行；无效配置结束为 error
+  且清掉 abort listener；关闭桥不注册 server，goal 关闭时仅注册 `dsh`。
+- 真实隔离 web：`DSH_HOME=.dsh-diag/iso-home`，loopback 19399，独立 fixture cwd。
+  `present` 成功，原生交付卡片显示 `report.txt`，侧栏正文为
+  `DSH bridge live acceptance fixture`；未点击操作系统“打开”按钮。
+- CLI 身份修复后旧 fixture 的交付 seq31 和 seq90 均关联真实 tool/call；修复前 seq11 的
+  随机身份事实保留作失败基线，不重写历史。旧 fixture 三回合曾完成并通过 97-event 校验；
+  后续第四回合在工具前失败为 `spawn EINVAL`，104-event 日志仍有效，失败输入保留未重投。
+- 最终主查询归属修复后，另建隔离 fixture `session-fd06f197-01c7-4162-81cb-2db1d5601e2c`：
+  八次调用顺序完成，八个真实结果配对，**57 events** 通过原生 v4 行和关系校验，turn completed。
+  新交付 seq46 关联 `call_6be6dd47d3be47f49c054cc5b1ed37cc`，原生 UI 卡片及正文再次核实。
+- 通过临时隔离-only 插件在原生 registry 创建两条无进程的 inert job（无模型 job-start）：
+  本 owner 的 list/output 显示 running 和 `OWNED-BRIDGE-PROBE`；foreign owner 的 output
+  与 kill 都返回 `job bridgeforeign-1 belongs to another session`；本 owner 的 kill 确认，
+  后续 output/list 显示 killed。另通过已认证 `job/list` 原生流 RPC 核实 foreign job 仍归属
+  原会话且 running，拒绝取消未改变其状态；流随后关闭。这不是用 unknown-job 错误冒充验收。
+- 新 fixture 验收时暂时关闭 isolated profile 的 mods，用于隔离此前启动错误；默认配置未改。
+  不能据此宣称已找到或修复 `spawn EINVAL` 根因；该启动诊断与工具桥的执行结果分开记录。
+  验收后已卸载临时 fixture、移除 `mods:false` 覆盖；仅保留已授权的隔离 bridge 开关。
+  已核对并停止专属 host PID，19399 无 listener，私密 bootstrap 删除；未改正式 profile。
+- 主查询/子代理归属、提前到达、未知 ID、名字替换、等待取消/超时/agent 替换有真实 SDK
+  回归，runner 在关闭 child 投影时仍拒绝借用父 scope。最终 fresh-context 审查只有这条
+  Important/P2 finding，已由失败复现测试 RED→GREEN 修复，没有再派发重复审查。
+- 完整 `pnpm test`：**313/313 pass**，0 failed/cancelled/skipped（带既有 experimental
+  module mocking / namedExports 警告）；四个产品入口 syntax check、`git diff --check` 通过。
+  `npm pack --dry-run`：39 files，包含 bridge，不包含 scratch/isolation/bootstrap/credentials。IDE build 不可用，因为本仓库未在 IDE 打开；没有构建其它项目。
+
+## 六、仍不承诺的能力
+
+桥不是标准主循环等价层。skills/persona/runtime 段落由宿主 `agent/pre-step` 装配，
+本插件刻意不派发整条装配管线（见 `2026-10-13-agent-pre-step-design.md`），不能靠工具桥解决。
+CLI 与 DSH jobs 是不同 registry；未提供同步、启动或恢复后台工作的能力。动态工具须重新
+审计并单独批准，而不是加一个名字就得到通用桥接权限。

@@ -48,6 +48,16 @@ function fakeQuestions(answer) {
 
 const baseCtx = (userQuestions) => ({ get: (key) => (key === "userQuestions" ? userQuestions : undefined) });
 
+test("goalToolNames 旧选项保留精确白名单语义，新选项优先", async () => {
+  const base = { cwd: "/w", session: sessionWith([]), agent: { id: "a" } };
+  const legacy = makeCanUseTool(baseCtx(undefined), { ...base, goalToolNames: ["mcp__custom__get_goal"] });
+  assert.equal((await legacy("mcp__custom__get_goal", {})).behavior, "allow");
+  assert.equal((await legacy("mcp__goal__get_goal", {})).behavior, "deny");
+  const selected = makeCanUseTool(baseCtx(undefined), { ...base, goalToolNames: ["mcp__custom__get_goal"], allowedToolNames: ["mcp__dsh__present"] });
+  assert.equal((await selected("mcp__dsh__present", {})).behavior, "allow");
+  assert.equal((await selected("mcp__custom__get_goal", {})).behavior, "deny");
+});
+
 test("danger-full-access 下 AskUserQuestion 仍走选择题桥，不被 bypass 短路成 allow", async () => {
   const questions = fakeQuestions();
   const canUseTool = makeCanUseTool(baseCtx(questions.service), {

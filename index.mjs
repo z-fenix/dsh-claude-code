@@ -47,6 +47,12 @@ const ENGINE_DEFAULTS = {
   contextWindow: undefined,
   /** 按所选 CLI 的实际能力捕获 compose 快照，不改用户全局插件配置。 */
   mods: { enabled: true, handshakeTimeoutMs: 8000 },
+  /**
+   * DSH 侧工具桥：把 agent scope 里**白名单点名**的几个 DSH 工具按 MCP 暴露给 Claude。
+   * 显式开启后默认只桥 Claude 没有对等物、且日志影响面已核对的几支（present / job_*）；
+   * 其余可见工具（fs/bash/grep/todo/skill…）刻意不桥——与 Claude 自带能力撞脸。
+   */
+  dshTools: { enabled: false, names: undefined },
   /** goal 模式：默认 MCP；mod/auto 是同一领域处理器的可选适配。 */
   goal: {
     enabled: true,
@@ -102,6 +108,7 @@ export const claudeCodeEngine = {
     const config = { ...ENGINE_DEFAULTS, ...(engineConfig ?? {}),
       goal: { ...ENGINE_DEFAULTS.goal, ...engineConfig?.goal },
       mods: { ...ENGINE_DEFAULTS.mods, ...engineConfig?.mods },
+      dshTools: { ...ENGINE_DEFAULTS.dshTools, ...engineConfig?.dshTools },
     };
     const machine = new ClaudeCodeAgent(loopCtx, id, options, session, config);
     // resume / fork 路径：把上次捕获的 Claude 会话 id 读回来，首轮即续接同一个 Claude 会话。
