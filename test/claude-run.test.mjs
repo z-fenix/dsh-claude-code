@@ -40,6 +40,516 @@ function fakeSink() {
   };
 }
 
+function streamEvent(tracer, event) {
+  tracer.handleMessage({ type: "stream_event", event });
+}
+
+for (const ending of ["finish", "error-result", "success-result"]) {
+  test(`无 envelope 的文本/reasoning 前缀在 ${ending} 后只保存一次`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 7, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_delta", index: 0,
+      delta: { type: "thinking_delta", thinking: "observed reasoning" } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1,
+      delta: { type: "text_delta", text: "safe " } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1,
+      delta: { type: "text_delta", text: "prefix" } });
+    if (ending !== "finish") tracer.handleMessage({ type: "result",
+      subtype: ending === "error-result" ? "error_during_execution" : "success",
+      usage: { input_tokens: 91, output_tokens: 19 } });
+    tracer.finish();
+    tracer.finish();
+    tracer.handleMessage({ type: "assistant", message: { content: [{ type: "text", text: "late" }] } });
+    const messages = sink.events.filter((event) => event.type === "assistant/message");
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0].data.message.content, [
+      { type: "reasoning", text: "observed reasoning" },
+      { type: "text", text: "safe prefix" },
+    ]);
+    assert.equal(messages[0].data.turn, 7);
+    assert.equal(messages[0].data.step, 1);
+    assert.equal(messages[0].opts.surfaceOp, "append");
+    assert.equal(messages[0].data.usage, undefined, "result 总用量不分配给缺 envelope 的前缀");
+    assert.equal(sink.events.filter((event) => event.type === "step/end").length, 1);
+    const ends = frames.filter((frame) => frame.type === "end");
+    assert.equal(ends.length, 1);
+    assert.deepEqual(ends[0].outcome, { kind: "committed", eventType: "assistant/message", seq: messages[0].seq });
+    assert.deepEqual(frames.filter((frame) => frame.chunk?.type === "text-delta").map((frame) => frame.chunk.text), ["safe ", "prefix"]);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+function partialThinkingResponse(tracer, usage) {
+  streamEvent(tracer, { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });
+  streamEvent(tracer, { type: "content_block_delta", index: 0,
+    delta: { type: "thinking_delta", thinking: "streamed reasoning" } });
+  tracer.handleMessage({ type: "assistant", message: {
+    id: "partial-response", content: [{ type: "thinking", thinking: "authoritative reasoning" }],
+    ...(usage === undefined ? {} : { usage }),
+  } });
+  streamEvent(tracer, { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+  streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "interrupted answer" } });
+}
+
+for (const ending of ["finish", "error-result", "success-result", "message-stop-finish", "next-response"]) {
+  test(`部分 thinking envelope 在 ${ending} 保留权威块和缺 envelope 的文本尾部`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    partialThinkingResponse(tracer);
+    if (ending === "message-stop-finish") streamEvent(tracer, { type: "message_stop" });
+    if (ending === "next-response") {
+      streamEvent(tracer, { type: "message_start", message: { id: "next-response" } });
+      tracer.handleMessage({ type: "assistant", message: { id: "next-response", content: [{ type: "text", text: "next" }] } });
+    }
+    if (ending.endsWith("-result")) tracer.handleMessage({ type: "result",
+      subtype: ending === "error-result" ? "error_during_execution" : "success",
+      usage: { input_tokens: 91, output_tokens: 19 } });
+    tracer.finish();
+    tracer.finish();
+    const messages = sink.events.filter((event) => event.type === "assistant/message");
+    assert.equal(messages.length, ending === "next-response" ? 2 : 1);
+    assert.deepEqual(messages[0].data.message.content, [
+      { type: "reasoning", text: "authoritative reasoning" },
+      { type: "text", text: "interrupted answer" },
+    ]);
+    assert.equal(messages[0].data.usage, undefined, "部分响应不借用 result 总用量");
+    assert.deepEqual(frames.filter((frame) => frame.attemptId === "s1:1.1" && frame.type === "end").map((frame) => frame.outcome), [
+      { kind: "committed", eventType: "assistant/message", seq: messages[0].seq },
+    ]);
+    assert.deepEqual(frames.filter((frame) => frame.attemptId === "s1:1.1" && frame.chunk?.type === "text-delta").map((frame) => frame.chunk.text), ["interrupted answer"]);
+    assert.equal(sink.events.filter((event) => event.type === "step/end").length, messages.length);
+    assert.equal(sink.events.filter((event) => event.type === "tool/call").length, 0);
+    if (ending === "next-response") assert.deepEqual(messages[1].data.message.content, [{ type: "text", text: "next" }]);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+for (const usageSource of ["assistant", "message_delta"]) {
+  test(`部分 envelope 保留实际 ${usageSource} 用量，不改为 result 总量`, () => {
+    const sink = fakeSink();
+    const tracer = new ClaudeRunTracer(sink, 1);
+    const usage = { input_tokens: 11, output_tokens: 3 };
+    partialThinkingResponse(tracer, usageSource === "assistant" ? usage : undefined);
+    if (usageSource === "message_delta") streamEvent(tracer, { type: "message_delta", usage });
+    tracer.handleMessage({ type: "result", subtype: "error_during_execution", usage: { input_tokens: 91, output_tokens: 19 } });
+    tracer.finish();
+    const message = sink.events.find((event) => event.type === "assistant/message");
+    assert.deepEqual(message.data.message.content.at(-1), { type: "text", text: "interrupted answer" });
+    assert.deepEqual(message.data.usage, { inputTokens: 11, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+}
+
+test("message_stop 不把部分 envelope 提前定稿，迟到文本 envelope 保持权威", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  partialThinkingResponse(tracer);
+  streamEvent(tracer, { type: "message_stop" });
+  assert.equal(sink.events.filter((event) => event.type === "assistant/message").length, 0);
+  tracer.handleMessage({ type: "assistant", message: { id: "partial-response", content: [{ type: "text", text: "authoritative answer" }] } });
+  tracer.handleMessage({ type: "result", subtype: "success", usage: { input_tokens: 17, output_tokens: 5 } });
+  tracer.finish();
+  const messages = sink.events.filter((event) => event.type === "assistant/message");
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].data.message.content, [
+    { type: "reasoning", text: "authoritative reasoning" }, { type: "text", text: "authoritative answer" },
+  ]);
+  assert.deepEqual(messages[0].data.usage, { inputTokens: 17, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  assert.equal(frames.filter((frame) => frame.type === "end").length, 1);
+  assert.deepEqual(frames.filter((frame) => frame.chunk?.type === "text-delta").map((frame) => frame.chunk.text), ["interrupted answer"]);
+});
+
+test("空 reasoning 完成块不使后续文本前缀错位", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "" } });
+  tracer.handleMessage({ type: "assistant", message: { id: "empty-thinking", content: [{ type: "thinking", thinking: "" }] } });
+  streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "visible" } });
+  tracer.finish();
+  assert.deepEqual(sink.events.find((event) => event.type === "assistant/message").data.message.content, [
+    { type: "reasoning", text: "" }, { type: "text", text: "visible" },
+  ]);
+});
+
+for (const ending of ["finish", "result"]) {
+  test(`signature-only 空 thinking envelope 后的文本在 ${ending} 仍保存`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });
+    streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "opaque" } });
+    tracer.handleMessage({ type: "assistant", message: { id: "signature-only", content: [{ type: "thinking", thinking: "", signature: "opaque" }] } });
+    streamEvent(tracer, { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "VISIBLE ANSWER" } });
+    if (ending === "result") tracer.handleMessage({ type: "result", subtype: "error_during_execution", usage: { input_tokens: 99, output_tokens: 20 } });
+    tracer.finish();
+    tracer.finish();
+    const messages = sink.events.filter((event) => event.type === "assistant/message");
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0].data.message.content, [
+      { type: "reasoning", text: "" }, { type: "text", text: "VISIBLE ANSWER" },
+    ]);
+    assert.equal(messages[0].data.usage, undefined);
+    assert.equal(frames.filter((frame) => frame.chunk?.type === "reasoning-delta").length, 0);
+    assert.deepEqual(frames.filter((frame) => frame.chunk?.type === "text-delta").map((frame) => frame.chunk.text), ["VISIBLE ANSWER"]);
+    assert.equal(frames.filter((frame) => frame.type === "end").length, 1);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+for (const id of [undefined, ""]) {
+  test(`无有效响应 id 的 envelope 不把下一条已完成文本补入前一条，id=${id}`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "reasoning" } });
+    tracer.handleMessage({ type: "assistant", message: { ...(id === undefined ? {} : { id }), content: [{ type: "thinking", thinking: "reasoning" }] } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "VISIBLE ANSWER" } });
+    tracer.handleMessage({ type: "assistant", message: { ...(id === undefined ? {} : { id }), content: [{ type: "text", text: "VISIBLE ANSWER" }] } });
+    tracer.finish();
+    tracer.finish();
+    assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => event.data.message.content), [
+      [{ type: "reasoning", text: "reasoning" }], [{ type: "text", text: "VISIBLE ANSWER" }],
+    ]);
+    assert.deepEqual(sink.events.filter((event) => event.type === "step/end").map((event) => event.data.step), [1, 2]);
+    assert.equal(frames.filter((frame) => frame.type === "end").length, 2);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+for (const [label, tail] of [
+  ["tool", { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "unadvertised", name: "Read" } }],
+  ["image", { type: "content_block_start", index: 2, content_block: { type: "image" } }],
+  ["invalid", { type: "content_block_delta", index: -1, delta: { type: "text_delta", text: "invalid" } }],
+  ["kind-conflict", { type: "content_block_delta", index: 1, delta: { type: "thinking_delta", thinking: "conflict" } }],
+]) {
+  test(`部分 envelope 遇到 ${label} 不把混合流伪装成安全尾部`, () => {
+    const sink = fakeSink();
+    const tracer = new ClaudeRunTracer(sink, 1);
+    partialThinkingResponse(tracer);
+    streamEvent(tracer, tail);
+    tracer.finish();
+    assert.deepEqual(sink.events.find((event) => event.type === "assistant/message").data.message.content, [
+      { type: "reasoning", text: "authoritative reasoning" },
+    ]);
+    assert.equal(sink.events.filter((event) => event.type === "tool/call").length, 0);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+for (const [label, content] of [
+  ["kind mismatch", [{ type: "text", text: "envelope text" }]],
+  ["filtered block", [{ type: "thinking", thinking: "complete" }, { type: "image" }]],
+]) {
+  test(`部分 envelope 的 ${label} 不猜测尾部对应关系`, () => {
+    const sink = fakeSink();
+    const tracer = new ClaudeRunTracer(sink, 1);
+    streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "streamed" } });
+    tracer.handleMessage({ type: "assistant", message: { id: "ambiguous", content } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "unmatched tail" } });
+    tracer.finish();
+    assert.deepEqual(sink.events.find((event) => event.type === "assistant/message").data.message.content,
+      label === "kind mismatch" ? [{ type: "text", text: "envelope text" }] : [{ type: "reasoning", text: "complete" }]);
+  });
+}
+
+// 实测端点会在中断响应里先发一个 redacted_thinking block（index 0），可见文本落在 index 1。
+// 该块不能持久化，但它也不携带可对齐正文：把它当作「未知块」会永久关闭安全前缀，
+// 收尾就写成空正文，界面已显示的文本在重放时消失。
+for (const ending of ["finish", "error-result", "success-result"]) {
+  test(`redacted_thinking envelope 不丢弃 index 1 的观察文本（${ending}）`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 3, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "VISIBLE " } });
+    streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "ANSWER" } });
+    tracer.handleMessage({ type: "assistant", message: { id: "redacted-response",
+      content: [{ type: "redacted_thinking", data: "ENCRYPTED-PAYLOAD" }] } });
+    if (ending !== "finish") tracer.handleMessage({ type: "result",
+      subtype: ending === "error-result" ? "error_during_execution" : "success",
+      usage: { input_tokens: 91, output_tokens: 19 } });
+    tracer.finish();
+    tracer.finish();
+    const messages = sink.events.filter((event) => event.type === "assistant/message");
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0].data.message.content, [{ type: "text", text: "VISIBLE ANSWER" }]);
+    assert.equal(messages[0].data.usage, undefined, "redacted envelope 不借用 result 总用量");
+    assert.equal(sink.events.filter((event) => event.type === "step/end").length, 1);
+    assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [
+      { kind: "committed", eventType: "assistant/message", seq: messages[0].seq },
+    ]);
+    assert.equal(JSON.stringify(sink.events).includes("ENCRYPTED-PAYLOAD"), false, "redacted 正文不进日志");
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+test("redacted_thinking 的 start 占位但不关闭前缀，后续文本仍可收尾", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  streamEvent(tracer, { type: "content_block_start", index: 0,
+    content_block: { type: "redacted_thinking", data: "ENCRYPTED-PAYLOAD" } });
+  streamEvent(tracer, { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+  streamEvent(tracer, { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "visible" } });
+  tracer.handleMessage({ type: "assistant", message: { id: "redacted-start",
+    content: [{ type: "redacted_thinking", data: "ENCRYPTED-PAYLOAD" }] } });
+  tracer.finish();
+  const messages = sink.events.filter((event) => event.type === "assistant/message");
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].data.message.content, [{ type: "text", text: "visible" }]);
+  assert.equal(JSON.stringify(sink.events).includes("ENCRYPTED-PAYLOAD"), false, "redacted 正文不进日志");
+  assert.equal(tracer.logIntact, true);
+});
+
+test("真正的未知块仍然关闭安全前缀", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "unmapped" } });
+  tracer.handleMessage({ type: "assistant", message: { id: "unknown-block",
+    content: [{ type: "image", source: { type: "base64", data: "AAAA" } }] } });
+  tracer.finish();
+  const messages = sink.events.filter((event) => event.type === "assistant/message");
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].data.message.content, []);
+  assert.equal(JSON.stringify(sink.events).includes("AAAA"), false);
+  assert.equal(tracer.logIntact, true);
+});
+
+test("部分 envelope 尾部补存拒写后不重投且只 abandoned 一次", () => {
+  const sink = fakeSink();
+  const append = sink.append;
+  const rejectedBodies = [];
+  sink.append = (type, data, opts) => {
+    if (type === "assistant/message") {
+      rejectedBodies.push(data.message.content);
+      throw new Error("partial envelope rejected");
+    }
+    return append(type, data, opts);
+  };
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  partialThinkingResponse(tracer);
+  tracer.finish();
+  tracer.finish();
+  assert.deepEqual(rejectedBodies, [[
+    { type: "reasoning", text: "authoritative reasoning" }, { type: "text", text: "interrupted answer" },
+  ]]);
+  assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+  assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+  assert.equal(tracer.logIntact, false);
+});
+
+const abandonedStreams = [
+  ["empty", [{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }]],
+  ["whitespace", [{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " \n" } }]],
+  ["tool-start", [
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "before tool" } },
+    { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t", name: "Read" } },
+  ]],
+  ["json-only", [{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":' } }]],
+  ["invalid-tool", [
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "safe text" } },
+    { type: "content_block_start", index: -1, content_block: { type: "tool_use", id: "t", name: "Read" } },
+  ]],
+  ["image", [
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "not an image adapter" } },
+    { type: "content_block_start", index: 1, content_block: { type: "image" } },
+  ]],
+];
+for (const [label, events] of abandonedStreams) {
+  test(`无 envelope 的 ${label} 流只 abandoned 不伪造消息`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    for (const event of events) streamEvent(tracer, event);
+    tracer.finish();
+    tracer.finish();
+    assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+    assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+test("前缀 append 失败只 abandoned 一次且日志标记不完整", () => {
+  const sink = fakeSink();
+  const append = sink.append;
+  let rejects = 0;
+  sink.append = (type, data, opts) => {
+    if (type === "assistant/message") { rejects += 1; throw new Error("prefix write rejected"); }
+    return append(type, data, opts);
+  };
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "prefix" } });
+  tracer.finish();
+  tracer.finish();
+  assert.equal(rejects, 1);
+  assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+  assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+  assert.equal(tracer.logIntact, false);
+});
+
+test("完整工具 envelope 写失败后不重投前缀或广告工具", () => {
+  const sink = fakeSink();
+  const append = sink.append;
+  let rejects = 0;
+  sink.append = (type, data, opts) => {
+    if (type === "assistant/message") { rejects += 1; throw new Error("envelope rejected"); }
+    return append(type, data, opts);
+  };
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "prefix" } });
+  tracer.handleMessage({ type: "assistant", message: { content: [
+    { type: "text", text: "complete" }, { type: "tool_use", id: "t", name: "Read", input: {} },
+  ] } });
+  tracer.finish();
+  tracer.finish();
+  assert.equal(rejects, 1);
+  assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+  assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+  assert.equal(tracer.logIntact, false);
+});
+
+for (const boundary of ["result", "message_stop"]) {
+  test(`完整 envelope 经 ${boundary} 拒写时保留错误和不完整标志，finish 不重投`, () => {
+    const sink = fakeSink();
+    const append = sink.append;
+    const rejection = new Error("pending envelope rejected");
+    let rejects = 0;
+    sink.append = (type, data, opts) => {
+      if (type === "assistant/message") { rejects += 1; throw rejection; }
+      return append(type, data, opts);
+    };
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "prefix" } });
+    tracer.handleMessage({ type: "assistant", message: { id: "response", content: [
+      { type: "text", text: "complete" }, { type: "tool_use", id: "t", name: "Read", input: {} },
+    ] } });
+    const trigger = boundary === "result"
+      ? { type: "result", subtype: "success" }
+      : { type: "stream_event", event: { type: "message_stop" } };
+    assert.throws(() => tracer.handleMessage(trigger), (error) => error === rejection);
+    assert.equal(tracer.logIntact, false);
+    tracer.finish();
+    tracer.finish();
+    assert.equal(tracer.logIntact, false);
+    assert.equal(rejects, 1);
+    assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+    assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+  });
+}
+
+test("忽略的 signature/citation metadata 不排除同类型分片前缀", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  for (const [index, delta] of [
+    [0, { type: "thinking_delta", thinking: "reason" }],
+    [0, { type: "signature_delta", signature: "synthetic signature" }],
+    [0, { type: "thinking_delta", thinking: "ing" }],
+    [1, { type: "text_delta", text: "visible" }],
+    [1, { type: "citations_delta", citation: { type: "synthetic" } }],
+    [1, { type: "text_delta", text: " answer" }],
+  ]) streamEvent(tracer, { type: "content_block_delta", index, delta });
+  tracer.finish();
+  assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => event.data.message.content), [[
+    { type: "reasoning", text: "reasoning" }, { type: "text", text: "visible answer" },
+  ]]);
+});
+
+test("同 index 冲突只排除前缀，完整 envelope 正文仍保持权威", () => {
+  const sink = fakeSink();
+  const tracer = new ClaudeRunTracer(sink, 1);
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "observed reasoning" } });
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "observed text" } });
+  tracer.handleMessage({ type: "assistant", message: { content: [{ type: "text", text: "authoritative envelope" }] } });
+  tracer.finish();
+  assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => event.data.message.content), [[{ type: "text", text: "authoritative envelope" }]]);
+  assert.equal(tracer.logIntact, true);
+});
+
+test("message_stop 不提前提交前缀，迟到 envelope 保持权威正文", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "live prefix" } });
+  streamEvent(tracer, { type: "message_stop" });
+  assert.equal(sink.types().includes("assistant/message"), false);
+  tracer.handleMessage({ type: "assistant", message: { content: [{ type: "text", text: "complete envelope" }] } });
+  tracer.finish();
+  assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => event.data.message.content), [[{ type: "text", text: "complete envelope" }]]);
+  assert.deepEqual(frames.filter((frame) => frame.chunk?.type === "text-delta").map((frame) => frame.chunk.text), ["live prefix"]);
+  assert.equal(frames.filter((frame) => frame.type === "end").length, 1);
+});
+
+for (const empty of [false, true]) {
+  test(`message_delta 用量不制造 ${empty ? "空正文" : "成功响应"}`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    streamEvent(tracer, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    if (!empty) streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "observed" } });
+    streamEvent(tracer, { type: "message_delta", usage: { input_tokens: 4, output_tokens: 2 } });
+    tracer.finish();
+    const messages = sink.events.filter((event) => event.type === "assistant/message");
+    assert.equal(messages.length, empty ? 0 : 1);
+    if (!empty) assert.deepEqual(messages[0].data.usage, { inputTokens: 4, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const ends = frames.filter((frame) => frame.type === "end");
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome.kind, empty ? "abandoned" : "committed");
+  });
+}
+
+for (const safeFirst of [false, true]) {
+  test(`非法文本 index 排除前缀，safeFirst=${safeFirst}`, () => {
+    const sink = fakeSink();
+    const frames = [];
+    const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+    if (safeFirst) streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "safe" } });
+    streamEvent(tracer, { type: "content_block_delta", index: -1, delta: { type: "text_delta", text: "bad" } });
+    tracer.finish();
+    assert.deepEqual(sink.types(), ["step/start", "step/end"]);
+    assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => frame.outcome), [{ kind: "abandoned" }]);
+    assert.equal(tracer.logIntact, true);
+  });
+}
+
+test("前缀 result 后后台新响应仍可完整落盘", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  streamEvent(tracer, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "prefix" } });
+  tracer.handleMessage({ type: "result", subtype: "error_during_execution" });
+  tracer.handleMessage({ type: "assistant", message: { content: [{ type: "text", text: "background response" }] } });
+  tracer.handleMessage({ type: "result", subtype: "success" });
+  tracer.finish();
+  assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => [event.data.step, event.data.message.content[0].text]), [[1, "prefix"], [2, "background response"]]);
+  assert.deepEqual(frames.filter((frame) => frame.type === "end").map((frame) => [frame.attemptId, frame.outcome.kind]), [["s1:1.1", "committed"], ["s1:1.2", "committed"]]);
+});
+
+for (const [type, delta] of [["text", { type: "text_delta", text: "single" }], ["reasoning", { type: "thinking_delta", thinking: "single" }]]) {
+  test(`只有 ${type} 的前缀也保存`, () => {
+    const sink = fakeSink();
+    const tracer = new ClaudeRunTracer(sink, 1);
+    streamEvent(tracer, { type: "content_block_delta", index: 2, delta });
+    tracer.finish();
+    assert.deepEqual(sink.events.filter((event) => event.type === "assistant/message").map((event) => event.data.message.content), [[{ type, text: "single" }]]);
+  });
+}
+
+test("未开启 attempt 的 finish 保持 no-op", () => {
+  const sink = fakeSink();
+  const frames = [];
+  const tracer = new ClaudeRunTracer(sink, 1, { emitStream: (frame) => frames.push(frame) });
+  tracer.finish();
+  tracer.finish();
+  assert.deepEqual(sink.events, []);
+  assert.deepEqual(frames, []);
+});
+
 /** 一整套最小 Claude SDK 消息序列：init → 文本 → 用量 → 助手帧 → 工具结果 → result。 */
 function sampleMessages() {
   return [

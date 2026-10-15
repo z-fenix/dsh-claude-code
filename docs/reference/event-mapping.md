@@ -4,7 +4,7 @@ title: 事件映射
 description: Claude Agent SDK 消息 → DSH 会话事件 / 实时帧的对照表。
 resource: lib/claude-run.mjs
 tags: [reference, events, trace]
-timestamp: 2026-10-13
+timestamp: 2026-10-14
 ---
 
 # 回合与 step 的分界
@@ -29,7 +29,7 @@ step 与首轮 step 同属一个回合（不伪造 `user/message`）。
 | Claude Agent SDK | DSH 会话事件 / 插件私有事实 | 说明 |
 |---|---|---|
 | `system/init` | `request/header`（`reason: "initial"`） | 模型名与内建工具表；工具名经 wire 映射。只在首轮或 model/tools 变化时写 |
-| `stream_event` `content_block_delta`（text） | — | 转成实时帧（见下），最终进 `assistant/message.stream` |
+| `stream_event` `content_block_delta`（text） | — | 转成实时帧（见下），完整响应或符合资格的中断前缀写入 `assistant/message.stream` |
 | `stream_event` `content_block_delta`（thinking） | — | 同上，`reasoning-delta` |
 | `stream_event` `content_block_delta`（input_json） | — | 同上，`tool-call-delta` |
 | `stream_event` `message_delta` | — | 本条消息的权威用量，落在随后那条 `assistant/message` 的 `usage` 上 |
@@ -89,6 +89,33 @@ CLI 进程内，不经过 DSH 的 `tools/pre-execute`，所以前一条路对插
 **实时帧只承载增量。** `agent/assistant-stream` 的分片会被客户端自增渲染，所以帧里只放
 文本 / 思考 / 工具入参分片，不放整块内容；完整内容在 `assistant/message` 的 `content` 与
 `stream` 里。
+
+**缺 envelope 的安全前缀。** 缺少完整 assistant envelope 时，查询/step 收尾仍可保存只有
+text/reasoning 的非空安全前缀。这是实际观察内容，不是完整成功响应；
+`end.outcome.kind = committed` 仅证明消息已落盘。前缀不补推完整 live chunk，不推算 usage，
+也不分配 result 总用量。没有任何 envelope 时只保留实际 message_delta 用量；部分 block
+已有 envelope 时仍保留实际 assistant/message_delta 用量，但不借用 result 聚合用量。
+
+SDK 的 `assistant` 可以只代表一个完成 block：已完成的 thinking/text 正文以 envelope 为准，
+若后续 block 只有 delta，最终收尾把可对齐的非空安全尾部补入同一条消息。对齐按过滤空块之前的
+原始位置与种类检查，要求 stream index 从 0 连续且按序出现；缺号、乱序、未知 envelope 块或
+混合/非法 stream 不猜测覆盖关系，只沿用已收到的 envelope。`message_stop` 遇到可补尾部的
+部分响应暂不定稿，等待迟到 block envelope 或 finish/result/下一响应 message_start 边界，避免提前丢掉权威正文。
+空块的 start 只为组装记录位置，不补造正文分片；signature-only thinking 因此也能与后续文本对齐。
+`redacted_thinking` 是已知的占位块：它占用一个 stream index，但没有可持久化正文，既不写成
+reasoning，也不算「未知块」。start 只登记位置，envelope 里只出现这种块时视为「没有可对齐正文」，
+收尾直接保存已观察到的合格前缀——此时没有位置需要猜测，index 不从 0 连续并不是丢前缀的理由
+（实测：端点先发该块，可见文本落在 index 1，此前收尾会写成空正文）。密文本身不写进任何事件。
+由新 assistant envelope 触发的旧消息边界只提交已有 envelope，不补存可能属于新 envelope 的 delta，
+尤其无有效 message.id 的旧协议仍逐消息处理，避免同一文本在前后两条消息里重复出现。
+
+空、无效或含工具/其它内容块的 stream-only attempt 只发 abandoned 终帧，不生成助手消息
+或工具调用。正常完整 envelope 的结算、工具和用量优先级不变；本次不覆盖 retry/supersede
+和缺 envelope 的多响应边界重构。`message_stop` 本身不提前提交缺 envelope 的前缀。
+
+离线验收分别覆盖真实 npm Session 的事件/surface 重建、公开 session invariant companion
+的 turn/step 关系和 `expandAssistantStream` 的 compact stream 结构，并用坏 step/坏 stream
+负控证明校验生效。这不等于安装版完整 v4 storage 校验或真实 SDK interrupt/桌面验收。
 
 # 输入与提示词事实
 
