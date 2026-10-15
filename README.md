@@ -144,6 +144,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - **宿主 persona 按项转发、其余 prompt 装配不转发**：本插件不派发 `agent/pre-step`，所以宿主 `systemPrompt.assemble()` 的产物不会自动进 Claude 的请求。其中部署方在预设里写死的 persona 两段（`deployment:persona-prefix/suffix`）会被**显式**取来、按宿主变量插值后追加进 CLI preset（`systemPrompt.append`，见 `lib/host-persona.mjs`）；工具用法段落（描述的是 DSH 的工具）与 runtime 上下文（描述的是 DSH 的沙箱/审批边界，Claude 模式下生效的其实是本插件的 permission/approval 策略）**刻意不转发**。取不到、装配失败、变量缺失或段落标了 `complete` 时一律不转发并留 reason，不会把 `{{cwd}}` 之类未插值的字面量发给模型。**skills 不在此列**：它不是 prompt 段落，而是 DSH 的 `skill` 工具（`@deepseek-ai/dsh-skill-filesystem` + `@deepseek-ai/dsh-tool-skill`），要补齐须作为新工具桥条目单独审计批准。
 - **goal 日志有限准入保护**：Goal 自动消息在准备前、异步准备后和日志写入口检查宿主公开状态；首批 SDK 交付前（包括 mod 握手和 MCP 回退后）再次核对已准入轮。运行中自动 goal 输入不受支持并在提交前拒绝。普通 followup、steer、inject 及 keepInbox 的原语义保留。读取失败不等于没有目标或自动恢复授权；已提交/不确定输入不自动重投。恢复会核对原生登记证据以避免重复 `user/message`。这是插件侧有限准入保护，不等价 standard 的私有 reservation/stale/content/fiber fence，不修复历史损坏日志。离线 Session/v4 重放不替代需另行批准的真实 Claude/宿主生命周期验收。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
+- **Windows 上解不开的 `.cmd`/`.bat` shim 被拒绝，不交给 SDK 去撞 errno**。npm 装的 `claude` 常是批处理 shim，升级中途它引用的可执行文件可能不在盘上。Claude Agent SDK 只按扩展名决定要不要用 node 起脚本，`.cmd` 会被它当原生可执行文件直接 spawn，而 Node 自 CVE-2024-27980 起同步抛 `spawn EINVAL`——用户只看到一个 errno，既不知道是哪个文件也不知道怎么修。插件改为：解析时跳过解不开的 shim、继续按 PATH 找可 spawn 的候选；一个都没有时以带路径与修复方向的可读错误拒绝整轮（`lib/auth.mjs` 的 `cannotSpawnDirectly`）。
 
 ## 🛠️ 图片输入排查
 

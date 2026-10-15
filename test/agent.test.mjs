@@ -48,6 +48,8 @@ mock.module("../lib/claude-run.mjs", {
 mock.module("../lib/auth.mjs", {
   namedExports: {
     resolveClaude: async (options) => { await resolveHook?.(options); return { executable: "fake-claude", env: {} }; },
+    // claude-run 会 import 这个谓词用于拒绝不可 spawn 的 shim；替身必须与真实模块同形。
+    cannotSpawnDirectly: () => false,
   },
 });
 

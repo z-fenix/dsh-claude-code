@@ -45,7 +45,11 @@ mock.module("@anthropic-ai/claude-agent-sdk", { namedExports: {
   createSdkMcpServer: (options) => options,
   tool: (name, description, inputSchema, handler) => ({ name, description, inputSchema, handler }),
 } });
-mock.module("../lib/auth.mjs", { namedExports: { resolveClaude: async () => ({ executable: "fake-claude", env: {} }) } });
+mock.module("../lib/auth.mjs", { namedExports: {
+  resolveClaude: async () => ({ executable: "fake-claude", env: {} }),
+  // claude-run 会 import 这个谓词用于拒绝不可 spawn 的 shim；替身必须与真实模块同形。
+  cannotSpawnDirectly: () => false,
+} });
 const { runClaudeCode } = await import("../lib/claude-run.mjs");
 const { ClaudeCodeAgent } = await import("../lib/agent.mjs");
 
