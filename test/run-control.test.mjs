@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Context } from "@deepseek-ai/cordis";
 import { RunInputChannel } from "../lib/run-input.mjs";
 import { attachFacts } from "./helpers/plugin-facts.mjs";
+import { wireGoalFixture } from "./helpers/goal-fixture.mjs";
 
 let active;
 let onQuery;
@@ -48,7 +49,7 @@ mock.module("../lib/auth.mjs", { namedExports: { resolveClaude: async () => ({ e
 const { runClaudeCode } = await import("../lib/claude-run.mjs");
 const { ClaudeCodeAgent } = await import("../lib/agent.mjs");
 
-function session() {
+function session(onNativeEvent = () => {}) {
   const events = [];
   const waiters = [];
   return attachFacts({ id: "s1", header: { cwd: "/w" }, events,
@@ -59,6 +60,7 @@ function session() {
     },
     append(type, data, opts) {
       const event = { type, data, opts, seq: events.length }; events.push(event);
+      onNativeEvent(event);
       for (const waiter of waiters) if (waiter.predicate(event)) waiter.resolve(event);
       return event;
     },
@@ -87,10 +89,12 @@ const success = (uuid) => ({ type: "result", subtype: "success", result: "done",
 function makeAgent(attachments) {
   active = undefined;
   const ctx = new Context();
-  ctx.provide("agents", { withInitiator: async (_agent, fn) => fn() });
+  let agent;
+  const goal = wireGoalFixture(ctx, () => agent);
   if (attachments) ctx.provide("attachments", attachments);
-  const s = session();
-  return { s, agent: new ClaudeCodeAgent(ctx, "s1", {}, s, { traceSubagents: false }) };
+  const s = session(event => goal.onNativeEvent(event));
+  agent = new ClaudeCodeAgent(ctx, "s1", {}, s, { traceSubagents: false });
+  return { s, agent, goal };
 }
 const imageMessage = (id) => ({ ...message(id), content: [{ type: "image", attachment: { attachmentId: "a1", width: 1, height: 1 } }] });
 
@@ -580,6 +584,220 @@ test("重启保留 steer 的 querying 意图，显式 wake 有效而 inject 不�
       assert.equal(injectRestored.s.events.filter((event) => event.type === "turn/start").length, 0);
     } finally { await injected.agent.dispose(); await injectRestored.agent.dispose(); }
   } finally { onQuery = undefined; release.resolve(); await maintenance; await agent.dispose(); await recovered?.agent.dispose(); }
+});
+
+for (const gate of ["before-prepare", "after-prepare"]) {
+  test(`active goal ${gate} 拒绝删除落盘失败不自动进入下一查询`, async () => {
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const { agent, s, goal } = makeAgent({ async readImageRequest() { entered.resolve(); return release.promise; } });
+    const queries = [];
+    onQuery = fake => {
+      queries.push(fake);
+      if (queries.length > 1) { fake.emit(success("active-auto")); fake.finish(); }
+    };
+    agent.followup(message("initial-human"));
+    while (!active) await Promise.resolve();
+    const fake = active; await fake.first;
+    const phase = agent.phase;
+    const append = s.append;
+    let failed = false;
+    try {
+      const automatic = gate === "before-prepare" ? message("active-auto", "goal") : imageMessage("active-auto");
+      agent.inbox.enqueue("next-step", automatic, true);
+      s.append = (type, data, opts) => {
+        if (!failed && type === "agent/inbox/spliced" && data.removedCount > 0) {
+          failed = true;
+          throw new Error("goal rejection persistence failed");
+        }
+        return append(type, data, opts);
+      };
+      agent.flushInput(agent.activeInput);
+      if (gate === "after-prepare") {
+        await entered.promise;
+        automatic.source = message("active-auto", "goal").source;
+        release.resolve({ data: new Uint8Array([1]), mediaType: "image/png" });
+      }
+      await agent.activeInput.flushing;
+      assert.equal(failed, true);
+      phase.keepInbox = true;
+      phase.wakeRequested = true;
+      fake.emit(success("initial-human")); fake.finish();
+      await agent.whenIdle(); await fake.ended;
+      assert.equal(queries.length, 1, "failed durable rejection must not become an initial goal round");
+      assert.equal(phase.inputFailure, true);
+      assert.equal(goal.view.roundsStarted, 0);
+      assert.equal(s.events.some(e => e.type === "user/message" && e.data.id === "active-auto"), false);
+      assert.equal(agent.inbox.nextStep[0], automatic);
+      assert.equal(agent.status, "idle");
+      s.append = append;
+      agent.wakeDriver();
+      await agent.whenIdle(); await queries.at(-1).ended;
+      assert.equal(queries.length, 2, "explicit wake may retry preserved evidence");
+      assert.deepEqual(queries[1].input.map(i => i.uuid), ["active-auto"]);
+      assert.equal(goal.view.roundsStarted, 1);
+    } finally {
+      s.append = append;
+      release.resolve({ data: new Uint8Array([1]), mediaType: "image/png" });
+      onQuery = undefined; active?.finish(); await agent.dispose();
+    }
+  });
+}
+
+test("active automatic goal 剔除后 steer/inject 重新准备", async () => {
+  const { agent, s } = makeAgent();
+  agent.followup(message("first"));
+  while (!active) await Promise.resolve();
+  const fake = active; await fake.first;
+  try {
+    agent.inbox.enqueue("next-step", message("stale-goal", "goal"), false);
+    agent.inbox.enqueue("next-step", message("steer"), true);
+    agent.inbox.enqueue("next-step", message("context", "system"), false);
+    agent.flushInput(agent.activeInput);
+    await fake.waitInput(2);
+    assert.deepEqual(fake.input[1].message.content, [{ type: "text", text: "steer\ncontext" }]);
+    assert.equal(fake.input[1].shouldQuery, true);
+    assert.equal(s.events.some(e => e.type === "user/message" && e.data.id === "stale-goal"), false);
+  } finally { fake.finish(); await agent.dispose(); }
+});
+test("active goal 剔除后只有 inject 按 shouldQuery false 交付", async () => {
+  const { agent, s } = makeAgent();
+  agent.followup(message("first"));
+  while (!active) await Promise.resolve();
+  const fake = active; await fake.first;
+  try {
+    agent.inbox.enqueue("next-step", message("stale-goal", "goal"), false);
+    agent.inbox.enqueue("next-step", message("context", "system"), false);
+    agent.flushInput(agent.activeInput);
+    await fake.waitInput(2);
+    assert.deepEqual(fake.input[1].message.content, [{ type: "text", text: "context" }]);
+    assert.equal(fake.input[1].shouldQuery, false);
+    assert.equal(s.events.some(e => e.type === "user/message" && e.data.id === "stale-goal"), false);
+  } finally { fake.finish(); await agent.dispose(); }
+});
+test("submit false 且 pending 不变不会重新 flush", async () => {
+  const { agent } = makeAgent();
+  const phase = { abort: new AbortController() };
+  let submissions = 0;
+  const lane = { phase, turn: 1, accepting: true, controller: { async submit() {
+    if (++submissions > 2) phase.abort.abort({ kind: "user" });
+    return false;
+  } } };
+  agent.activeInput = lane;
+  agent.inbox.enqueue("next-step", message("pending"), true);
+  agent.flushInput(lane); await lane.flushing; await Promise.resolve();
+  assert.equal(submissions, 1);
+  assert.equal(agent.inbox.nextStep[0].id, "pending");
+  agent.activeInput = undefined; await agent.dispose();
+});
+test("初始 canStartInput 晚拒绝不是日志失败或已交付", async () => {
+  let allowed = true;
+  onQuery = fake => { allowed = false; fake.finish(); };
+  const run = start({ canStartInput: () => allowed });
+  try {
+    const result = await run.run; await run.fake()?.ended;
+    assert.equal(result.initialSubmitted, false);
+    assert.equal(result.initialRejected, true);
+    assert.equal(result.logIntact, true);
+    assert.equal(run.fake()?.input.length ?? 0, 0);
+    assert.ok(run.fake()?.closes > 0);
+  } finally { onQuery = undefined; run.fake()?.finish(); await run.run; }
+});
+test("初始 query 前拒绝不创建查询", async () => {
+  onQuery = fake => fake.finish();
+  const run = start({ canStartInput: () => false });
+  try {
+    const result = await run.run;
+    assert.equal(run.fake(), undefined);
+    assert.equal(result.initialRejected, true);
+    assert.equal(result.logIntact, true);
+  } finally { onQuery = undefined; run.fake()?.finish(); await run.run; }
+});
+test("首批 prepareInitial 等待后重读授权", async () => {
+  let allowed = true;
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  const prompt = { async *[Symbol.asyncIterator]() { entered.resolve(); await release.promise; yield { message: { content: "u1" } }; } };
+  onQuery = fake => fake.finish();
+  const run = start({ prompt, canStartInput: () => allowed });
+  try {
+    await entered.promise; allowed = false; release.resolve();
+    const result = await run.run;
+    assert.equal(result.initialRejected, true);
+    assert.equal(run.fake(), undefined);
+  } finally { release.resolve(); onQuery = undefined; run.fake()?.finish(); await run.run; }
+});
+test("生产 Agent 已登记 goal 在 query 创建期间 disarm，模型输入为零", async () => {
+  const { agent, s, goal } = makeAgent();
+  const created = Promise.withResolvers();
+  onQuery = fake => { goal.view.activation = "disarmed"; created.resolve(fake); fake.finish(); };
+  try {
+    agent.followup(message("late-goal", "goal"));
+    const fake = await created.promise; await agent.whenIdle(); await fake.ended;
+    assert.equal(fake.input.length, 0);
+    assert.equal(s.events.filter(e => e.type === "user/message" && e.data.id === "late-goal").length, 1);
+    assert.equal(goal.view.roundsStarted, 1);
+    assert.ok(fake.closes >= 1);
+  } finally { onQuery = undefined; active?.finish(); await agent.dispose(); }
+});
+test("Promise canStartInput 不能作为 truthy 放行", async () => {
+  onQuery = fake => fake.finish();
+  const run = start({ canStartInput: () => Promise.resolve(false) });
+  try {
+    const result = await run.run;
+    assert.equal(result.stopReason, "error");
+    assert.match(result.output[0].text, /canStartInput must return boolean/);
+    assert.equal(run.fake(), undefined);
+  } finally { onQuery = undefined; run.fake()?.finish(); await run.run; }
+});
+test("Promise canSubmitInput 不能作为 truthy 放行", async () => {
+  const run = start({ canSubmitInput: () => Promise.resolve(false) });
+  const fake = await first(run);
+  try {
+    await assert.rejects(run.control().submit([message("forbidden")]), /canSubmitInput must return boolean/);
+    assert.equal(fake.input.length, 1);
+  } finally { fake.finish(); await run.run; }
+});
+
+test("active 图片准备期间替换为 goal 不投递旧图片或自动项", async () => {
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  const { agent, s } = makeAgent({ async readImageRequest() { entered.resolve(); return release.promise; } });
+  agent.followup(message("first"));
+  while (!active) await Promise.resolve();
+  const fake = active; await fake.first;
+  try {
+    agent.steer(imageMessage("edited-goal"));
+    await entered.promise;
+    agent.inbox.replace("edited-goal", message("edited-goal", "goal"));
+    release.resolve({ data: new Uint8Array([1]), mediaType: "image/png" });
+    await agent.activeInput.flushing;
+    assert.equal(fake.input.length, 1);
+    assert.equal(agent.inbox.nextStep.length, 0);
+    assert.equal(s.events.some(e => e.type === "user/message" && e.data.id === "edited-goal"), false);
+  } finally { release.resolve({ data: new Uint8Array([1]), mediaType: "image/png" }); fake.finish(); await agent.dispose(); }
+});
+test("已登记 goal 晚读取失败 recover clone 保留 hold，无自动忙循环", async () => {
+  const { agent, s, goal } = makeAgent();
+  onQuery = fake => {
+    goal.error = new Error("projection failed");
+    agent.phase.keepInbox = true;
+    agent.phase.wakeRequested = true;
+    fake.finish();
+  };
+  try {
+    agent.followup(message("held-goal", "goal"));
+    await agent.whenIdle();
+    await active.ended;
+    assert.equal(active.input.length, 0);
+    assert.equal(goal.reads, 5);
+    assert.equal(agent.status, "idle");
+    assert.equal(agent.inbox.nextTurn[0].id, "held-goal");
+    assert.equal(agent.heldGoalInputs.has(agent.inbox.nextTurn[0]), true);
+    assert.equal(s.events.filter(e => e.type === "user/message" && e.data.id === "held-goal").length, 1);
+    onQuery = fake => { fake.emit(success("human-after-hold")); fake.finish(); };
+    agent.followup(message("human-after-hold"));
+    await agent.whenIdle(); await active.ended;
+    assert.deepEqual(active.input.map(i => i.uuid), ["human-after-hold"]);
+    assert.equal(goal.reads, 6);
+  } finally { onQuery = undefined; active?.finish(); await agent.dispose(); }
 });
 
 test("idle inject 不建立回合；idle steer 可以唤醒查询", async () => {

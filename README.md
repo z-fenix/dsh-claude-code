@@ -115,7 +115,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 - **审批桥不等于 DSH 的执行沙箱，但 `read-only` 的写限制会自己落地**。Claude 内建工具不经过 DSH 的文件系统/进程执行器，DSH 文件沙箱的 `writableRoots` 对它们无效，所以插件按 sandbox mode 自己补一层：`read-only` 下 `Write` / `Edit` / `MultiEdit` / `NotebookEdit` **一律拒绝**，不弹审批——不给「批准一次就放行」的口子（standard 会话在 read-only 下无论怎么批准都改不了文件）。`workspace-write` 下工作区内的 `blockedPath` 可自动放行，`never` 本身不授予写权限，Full access 维持既有交互。**残余边界**：`Bash` 是否写文件无法静态判定，仍走审批，因此这仍不构成与 standard 等价的**操作系统级**隔离。
 
-- **不派发宿主 `agent/pre-step`**。那是原生循环装配 prompt 的管线（工作区指令、时间快照、plan-mode 段落、DSH 侧自动压缩都在这一步改写装配结果），而本插件的 prompt 由插件自己生成、真正发出的请求由 Claude Code CLI 装配——DSH 的装配结果从不上网。照搬会让工作区指令被注入两遍（CLI 本来就会加载），并让压缩/段落作用于模型看不到的节点。代价：goal 轮没有宿主的 revision fence（排队后、开始前目标被改的窗口内那一轮不会被拒），goal 轮也不按「独立请求序列」渲染请求头。论证与监听器清单见 `docs/superpowers/specs/2026-10-13-agent-pre-step-design.md`。
+- **不派发宿主 `agent/pre-step`**。那是原生循环装配 prompt 的管线（工作区指令、时间快照、plan-mode 段落、DSH 侧自动压缩都在这一步改写装配结果），而本插件的 prompt 由插件自己生成、真正发出的请求由 Claude Code CLI 装配——DSH 的装配结果从不上网。照搬会让工作区指令被注入两遍（CLI 本来就会加载），并让压缩/段落作用于模型看不到的节点。代价：goal 轮仍没有 standard 的私有 reservation fence（插件侧有限准入保护见下文），goal 轮也不按「独立请求序列」渲染请求头。论证与监听器清单见 `docs/superpowers/specs/2026-10-13-agent-pre-step-design.md`。
 
 - **`/compact` 改不了 Claude 的真实上下文**。DSH 的 `/compact` 走 `ctx.compaction.compactNow`，压的是 DSH 会话日志的 surface 节点；Claude 的真实上下文在 CLI 进程里，由 CLI 自己按阈值压缩。插件**无法**触发 CLI 的压缩：SDK 的控制请求里没有 compact，而 CLI 自己触发时用的内部 `isMeta` 标记也不在 `SDKUserMessage` 上（实测把 `/compact` 当普通消息提交只会得到一轮零 step 的空回合）。所以 Claude Code 会话里按 `/compact` 只影响 DSH 显示面；长会话的自动压缩由 CLI 负责，代理不支持压缩请求时会以 `unrecognized_model … "query_source":"compact"` 硬失败并打挂整轮。详见 `docs/superpowers/specs/2026-10-13-claude-compaction-design.md`。**不过 CLI 自己的压缩不再是无声的**：它上报的边界与成败会记成 `claude-code/compact` 事实（带前后 token、耗时，失败时带 `compact_error`），压缩开始/成功/失败都可审计。DSH 面板的 context 分项是宿主自己的启发式估计，插件无法把 Claude 的真实分项喂进去（无接口），但压力条的分子/分母取的是真实用量与真实窗口。
 
@@ -140,8 +140,24 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 - **暂停目标须显式恢复**：`active + disarmed` 可由有权限的人类回合请求重新激活；`paused` 保持标准策略，只能通过 `/goal resume` 或目标条 ▶ 恢复。聊天里的“继续”并不保证恢复暂停目标。
 - mod 检查失败或握手超时会记录 `claude-code/mod-status` 并保留 MCP。实测所选 CLI **2.1.296** 通过；SDK 附带 **2.1.220** 不支持本 mod 的 hooks 格式。插件不会自动升级 CLI。
 - **子代理保持 one-shot，不能从这里续聊**。SDK 的控制请求里没有「给子代理发消息 / 恢复子代理」这一项；CLI 的 `SendMessage` 是**模型手里的工具**，插件无法代为调用。唯一的非模型通道是 mod 钩 `SubagentStop` 在子代理收尾时喂一段反馈——那是「再推它一把」，不是「点开子会话接着聊」。结构上子代理活在**父查询进程内**，父查询一结束转录只能读、不能对话。因此目录里**保持 `mode: "one-shot"`**，不为界面把 mode 改成看起来能继续。详见 `docs/superpowers/specs/2026-10-13-continuable-subagent-design.md`。
-- **DSH 工具桥尚未接入**。把 DSH 侧的工具（`present`、`jobs`、动态插件工具）桥进 Claude 会话在机制上可行——`ctx.tools` 的 `schemas(scope)` / `execute(exec)` 就是宿主认可的接缝，本插件也已有受限本机桥与 MCP/mod 两条注册通道；但还差两件必须真机核对的事：**白名单范围**（每个桥进来的工具都会变成模型可调用的动作）与 **JSON Schema → SDK Zod 的方言转换**（SDK 的 `tool()` 要 Zod raw shape，mod 的 `$.tool.register` 要 JSON Schema）。默认不开启。设计与风险见 `docs/superpowers/specs/2026-10-14-dsh-tool-bridge-design.md`。
+- **DSH 工具桥默认关闭、只开放审计白名单**：显式设置 `engines.claude-code.dshTools.enabled: true` 后，将当前 agent 可见的 `present` / `job_list` / `job_output` / `job_kill` 注册为 `mcp__dsh__*`。`names` 只能缩小这个集合，不开放动态工具、DSH bash/fs 或 job-start。优先取宿主 `wireSchemas(agent).schemas`，尊重 PTC 的 `run_code` 折叠；SDK 边界用 `z.fromJSONSchema` 转换完整对象。调用使用 CLI 的真实 tool-use ID，并重新核对查询、取消信号、原 agent 对象和工具可见性，再走宿主 `execute(exec)` 门控。缺少 CLI 身份元数据时拒绝执行，查询结束后旧 handler 失效。**仅主查询可使用这个父 agent 桥**：同一 ID 和工具名必须被主轨迹确认；子代理继承调用与未知归属均拒绝，绝不借用父目录、交付会话或 jobs owner。MCP 请求先到时最多等待 5 秒确认，取消/关闭会清理等待。真实隔离 web 实例已核实交付卡片、侧栏文件正文及原生 v4 日志；真实 SDK 注册与参数校验有回归覆盖。**jobs 是 DSH 的原生 registry，不包含 Claude 自己的后台任务**；宿主完成通知仍走原生 inbox。本桥不注入 persona/runtime 提示词段，也不替代标准主循环。设计与验收见 `docs/superpowers/specs/2026-10-14-dsh-tool-bridge-design.md`。
+- **goal 日志有限准入保护**：Goal 自动消息在准备前、异步准备后和日志写入口检查宿主公开状态；首批 SDK 交付前（包括 mod 握手和 MCP 回退后）再次核对已准入轮。运行中自动 goal 输入不受支持并在提交前拒绝。普通 followup、steer、inject 及 keepInbox 的原语义保留。读取失败不等于没有目标或自动恢复授权；已提交/不确定输入不自动重投。恢复会核对原生登记证据以避免重复 `user/message`。这是插件侧有限准入保护，不等价 standard 的私有 reservation/stale/content/fiber fence，不修复历史损坏日志。离线 Session/v4 重放不替代需另行批准的真实 Claude/宿主生命周期验收。
 - **goal 续跑依赖 DSH host 平面的 goal 栈**（`dsh-goal` + `dsh-goal-round-driver`）。未装该栈的部署里 `goal.enabled` 自动失效（不挂工具、不加提示），`/goal` 行为回落到 DSH 原生（若该预设未挂 `command-goal`，则无 `/goal` 命令）。
+
+## 🛠️ 图片输入排查
+
+如果发送图片得到 `session/attachment-invalid` / `MODEL_DOES_NOT_SUPPORT_IMAGES`，拒绝发生在 DSH 的消息准入阶段，尚未进入 Claude Code 插件。插件能转发图片，并不代表当前模型已被宿主声明为支持图片。
+
+使用 `@deepseek-ai/dsh-llm-pi-ai` 的自定义模型别名时，应在该 provider 的**具体模型条目**中声明真实能力，例如：
+
+```yaml
+models:
+  - id: your-vision-model-alias
+    name: Your vision model
+    input: [text, image]
+```
+
+这里的配置键是 `input`（不是解析结果里的 `inputModalities`）；未知自定义模型省略它会保守地默认为纯文本。此配置属于宿主模型 provider，不属于 `engines.claude-code`。不要为混合模型目录统一开启图片，也不要给实际纯文本模型添加图片能力。重载配置或重启 DSH 后确认模型元数据；准入通过仍不等于上游网关实际接受图片，需要另行验证。
 
 ## 🧪 开发
 

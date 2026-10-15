@@ -237,6 +237,35 @@ test("mod 启动握手失败时未发送输入便关闭，新的查询只用 MCP
   } finally { handshake = true; }
 });
 
+test("fallback 新 query 前失效不交付且关闭零输入旧句柄", async () => {
+  queries.length = 0;
+  handshake = false;
+  try {
+    const options = runOptions({ mods: { enabled: true, handshakeTimeoutMs: 20 }, goal: { transport: "mod" } });
+    options.canStartInput = () => queries.length === 0;
+    const result = await runClaudeCode(options);
+    assert.equal(result.initialRejected, true);
+    assert.equal(result.initialSubmitted, false);
+    assert.equal(result.logIntact, true);
+    assert.equal(queries.length, 1);
+    assert.equal(queries[0].input.length, 0);
+    assert.ok(queries[0].closes > 0);
+  } finally { handshake = true; }
+});
+
+test("mod ready 后交付 gate 拒绝保持零输入并正常关闭", async () => {
+  queries.length = 0;
+  const options = runOptions({ mods: { enabled: true }, goal: { transport: "mod" } });
+  options.canStartInput = () => queries.length === 0;
+  const result = await runClaudeCode(options);
+  assert.equal(result.initialRejected, true);
+  assert.equal(result.initialSubmitted, false);
+  assert.equal(result.logIntact, true);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].input.length, 0);
+  assert.ok(queries[0].closes > 0);
+});
+
 test("mod 不支持时状态仅保存在独立台账", async () => {
   const root = mkdtempSync(join(tmpdir(), "dsh-mod-facts-"));
   const previous = process.env.DSH_CLAUDE_CODE_STORE;

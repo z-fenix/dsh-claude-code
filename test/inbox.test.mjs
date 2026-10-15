@@ -123,6 +123,24 @@ test("replace / remove 按 id 定位并返回是否命中", () => {
   assert.equal(inbox.remove("m1"), false);
 });
 
+test("exact remove 不删除同 id 的替代对象或写入 splice", () => {
+  const session = fakeSession();
+  const dispatch = fakeDispatch();
+  const inbox = new DshInbox(session, dispatch);
+  const oldMessage = msg("same", "old");
+  const replacement = msg("same", "new");
+  inbox.append("next-turn", oldMessage);
+  inbox.replace("same", replacement);
+  const before = session.snapshotEvents().length;
+  const notifications = dispatch.seen.length;
+  assert.equal(inbox.remove("same", oldMessage), false);
+  assert.equal(inbox.nextTurn[0], replacement);
+  assert.equal(session.snapshotEvents().length, before);
+  assert.equal(dispatch.seen.length, notifications);
+  assert.equal(inbox.remove("same", replacement), true);
+  assert.equal(inbox.nextTurn.length, 0);
+});
+
 test("clear 先清 next-step 再清 next-turn，并写 canceled 结果", () => {
   const session = fakeSession();
   const inbox = new DshInbox(session, fakeDispatch());
