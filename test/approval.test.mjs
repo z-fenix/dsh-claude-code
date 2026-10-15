@@ -34,7 +34,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", {
   },
 });
 
-const { makeCanUseTool } = await import("../lib/approval.mjs");
+const { makeCanUseTool, makePreToolUseHook } = await import("../lib/approval.mjs");
 const { runClaudeCode } = await import("../lib/claude-run.mjs");
 const { GOAL_TOOL_PREFIX } = await import("../lib/goal-bridge.mjs");
 
@@ -210,6 +210,42 @@ test("sandbox 只在显式配置时透传给 SDK，且原样不动", async () =>
   assert.equal("sandbox" in absent, false, "未配置时不能留一个 undefined 的键给 SDK");
 });
 
+// CLI 对「自己判定为只读」的命令不调 canUseTool（实机核验见文件末尾的钩子一节），所以只读的
+// 确定性拒绝必须在 SDK options 里另挂一个 PreToolUse 钩子——这里守住「确实挂上了、且现读权限」。
+test("SDK options 里挂上 PreToolUse 钩子：只读会话拒绝，workspace-write 会话不表态", async () => {
+  const ctx = { get: () => undefined, logger: { warn: () => {}, info: () => {} } };
+  const options = await runReadOnly("s7", {}, ctx);
+  const matchers = options.hooks?.PreToolUse;
+  assert.equal(Array.isArray(matchers), true, "只读边界必须在 SDK 层有第二个入口");
+  assert.equal(matchers[0].hooks.length, 1);
+  const input = { hook_event_name: "PreToolUse", tool_name: "PowerShell", tool_input: { command: "Get-ChildItem" }, tool_use_id: "t1" };
+  const denied = await matchers[0].hooks[0](input);
+  assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
+
+  capturedOptions = [];
+  await runClaudeCode({
+    ctx,
+    config: {},
+    session: {
+      id: "s8",
+      append() {},
+      requestContext: () => undefined,
+      requestHeader: () => undefined,
+      snapshotEvents: () => [ev("sandbox/mode", { mode: "workspace-write" }), ev("approval/policy", { policy: "ask" })],
+    },
+    agent: { id: "a1" },
+    turn: 1,
+    prompt: "hi",
+    signal: new AbortController().signal,
+    cwd: "/w",
+    executable: "claude",
+    env: {},
+  });
+  const writeHook = capturedOptions[0].hooks?.PreToolUse?.[0]?.hooks?.[0];
+  assert.equal(typeof writeHook, "function");
+  assert.equal((await writeHook(input)).hookSpecificOutput, undefined, "workspace-write 下钩子不得越权改判");
+});
+
 test("read-only + never 不因 blockedPath 在工作区内而放行写入", async () => {
   const canUseTool = makeCanUseTool(baseCtx(undefined), {
     cwd: "/w",
@@ -356,6 +392,50 @@ test("read-only：显式配 readOnlyBash=ask 时 PowerShell 也退回审批 seam
   const result = await canUseTool("PowerShell", { command: "Get-ChildItem" });
   assert.equal(approvals.length, 1, "放宽策略对 Bash 与 PowerShell 一视同仁");
   assert.equal(result.behavior, "allow");
+});
+
+// --- PreToolUse 钩子：canUseTool 看不到的那些调用（第二期 · 执行边界的补集） ---
+// CLI 会把「它自己判定为只读」的命令直接放行，根本不问权限回调——实机核验（2026-10-15，隔离
+// web 实例）里只读会话的 `Get-ChildItem` 执行成功且全程没有 approval/asked。这类执行插件在
+// canUseTool 里根本看不见，只读边界对它们等于不存在。钩子对每一次工具调用都会触发（SDK 文档：
+// 「PreToolUse hook denies bypass canUseTool」），所以确定性拒绝必须在这里再挂一份；两处共用
+// 同一份策略文本（readOnlyDenial），断言它们逐字相同，避免以后只改一处而脱钩。
+
+test("read-only：PreToolUse 钩子拒绝 shell 工具（CLI 自动放行的调用也拦得住），理由与 canUseTool 一致", async () => {
+  const session = sessionWith([ev("sandbox/mode", { mode: "read-only" })]);
+  const hook = makePreToolUseHook({ session });
+  const out = await hook({ hook_event_name: "PreToolUse", tool_name: "PowerShell", tool_input: { command: "Get-ChildItem" }, tool_use_id: "t1" });
+  assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
+  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /read-only/);
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /engines\.claude-code\.readOnlyBash/);
+  const canUseTool = makeCanUseTool(baseCtx(undefined), { cwd: "/w", session, agent: { id: "a1" } });
+  const result = await canUseTool("PowerShell", { command: "Get-ChildItem" });
+  assert.equal(result.message, out.hookSpecificOutput.permissionDecisionReason, "两个入口必须是同一条策略");
+});
+
+test("read-only：PreToolUse 钩子同样拒绝写文件工具", async () => {
+  const hook = makePreToolUseHook({ session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]) });
+  const out = await hook({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: "/w/a.txt" }, tool_use_id: "t1" });
+  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /read-only file policy/);
+});
+
+test("PreToolUse 钩子只做拒绝：不放行也不改判，策略不适用时不表态", async () => {
+  const ask = (session, readOnlyBash, tool) => makePreToolUseHook({ session, readOnlyBash })({
+    hook_event_name: "PreToolUse", tool_name: tool, tool_input: { command: "Get-ChildItem" }, tool_use_id: "t1",
+  });
+  const write = sessionWith([ev("sandbox/mode", { mode: "workspace-write" })]);
+  assert.equal((await ask(write, undefined, "Write")).hookSpecificOutput, undefined);
+  assert.equal((await ask(write, undefined, "Bash")).hookSpecificOutput, undefined);
+  const readOnly = sessionWith([ev("sandbox/mode", { mode: "read-only" })]);
+  // 只读工具不表态（拒绝只针对写文件 / 执行命令这两类）。
+  assert.equal((await ask(readOnly, undefined, "Read")).hookSpecificOutput, undefined);
+  // readOnlyBash=ask 时钩子让路：那次放宽由 canUseTool 的审批 seam 负责，不能在这里变成硬拒绝。
+  assert.equal((await ask(readOnly, "ask", "Bash")).hookSpecificOutput, undefined);
+  // 非 PreToolUse 的事件不参与（兜底：回调只挂在 PreToolUse 下）。
+  const other = await makePreToolUseHook({ session: readOnly })({ hook_event_name: "PostToolUse", tool_name: "Bash" });
+  assert.equal(other.hookSpecificOutput, undefined);
 });
 
 test("read-only：显式配 readOnlyBash=ask 才退回审批 seam", async () => {

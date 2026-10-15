@@ -87,6 +87,15 @@ Claude 的文件工具。工作区不在任何 git 仓库内时，宿主记录�
 `NotebookEdit`（入参是 `notebook_path`）虽然同样被派发，但 `mutationPath` 取不到路径，**不产生改动前
 捕获**——插件不改写入参去迁就记录器，那会让监听器看到的参数与实际执行的调用不一致。shell 改动同样不计。
 
+**read-only 的执行边界有两个入口。** CLI 会把「它自己判定为只读」的命令直接放行，根本不调
+`canUseTool`（实机核验 2026-10-15：只读会话里 `Get-ChildItem` 执行成功，`tool/call` 与
+`tool/result` 之间**没有** `approval/asked`）。所以只读的确定性拒绝同时挂在 `canUseTool` 与 SDK 的
+`PreToolUse` 钩子（`options.hooks.PreToolUse`）上，两处共用 `lib/approval.mjs` 的 `readOnlyDenial`
+一份策略、理由逐字相同；钩子只做拒绝（不表态时返回 `{}`，让 CLI 继续走它自己的权限流程），权限
+每次现读。日志里三种拒绝可以区分：钩子拒绝写成 `PreToolUse:<工具名> hook error: <理由>` 的
+`tool/result`（`isError: true`，**无** `approval/asked`）；审批拒绝有 `approval/asked` +
+`approval/decided`；CLI 自己的拒绝另有文案。
+
 **用量必须与消息同一条事件落盘。** `dsh-token-meter` 的 `usageOf()` 只读
 `assistant/message.data.usage`，或它内嵌 `stream` 里最后一个 `usage` 分片。而 Claude 的用量
 常常在 `result` 才给全，因此最后一条助手消息会**延迟结算**到 `result`：结算时按

@@ -55,8 +55,8 @@ timestamp: 2026-10-13
 | `traceSubagents` | boolean | `true` | 把 Claude Code 内部子代理（Agent / Task 工具）映射成独立只读 DSH 子会话。关闭后这些消息被丢弃，主轨迹更干净 |
 | `env` | Record<string, string> | `{}` | 追加给 claude 子进程的环境变量，覆盖父环境同名值（如 `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`） |
 | `contextWindow` | number | 未配置 | 手动指定模型上下文窗口（token 数）。SDK 的 `result.modelUsage` 取不到时用它兜底 |
-| `readOnlyBash` | `"deny"` \| `"ask"` | `"deny"` | read-only 会话里 `Bash` 的策略。`deny` 直接拒绝且不弹审批（命令是否写文件无法静态判定，而 Claude 的 Bash 没有 DSH 文件沙箱兜底）；`ask` 退回「批准一次就放行」。只影响 `Bash`，不影响文件工具，也不影响 `workspace-write` / `never` / Full access |
-| `sandbox` | object（SDK `SandboxSettings`） | 未配置 | 原样透传给 `query()` 的 `sandbox`；不配则完全不传。**不是 DSH 沙箱**：依赖 Linux bubblewrap / macOS `sandbox-exec`，Windows 不生效；沙箱内被 CLI 自行放行的命令可能不经过 `canUseTool`，此时 read-only 判定不适用 |
+| `readOnlyBash` | `"deny"` \| `"ask"` | `"deny"` | read-only 会话里 shell 工具的策略，**按整类工具名生效**（`Bash`，以及 Windows 上 CLI 报的 `PowerShell`）。`deny` 直接拒绝且不弹审批（命令是否写文件无法静态判定，而 Claude 的 shell 没有 DSH 文件沙箱兜底）；`ask` 退回「批准一次就放行」，且钩子让路、只对 CLI 交上来的调用生效。判定挂在两个入口（`canUseTool` 与 SDK 的 `PreToolUse` 钩子），所以 CLI 自行放行的只读命令也按它处理。不影响文件工具，也不影响 `workspace-write` / `never` / Full access |
+| `sandbox` | object（SDK `SandboxSettings`） | 未配置 | 原样透传给 `query()` 的 `sandbox`；不配则完全不传。**不是 DSH 沙箱**：依赖 Linux bubblewrap / macOS `sandbox-exec`，Windows 不生效；沙箱内被 CLI 自行放行的命令可能不经过 `canUseTool`，但 read-only 判定由 `PreToolUse` 钩子照样生效（要让沙箱自己当边界就配 `readOnlyBash: "ask"`） |
 | `mods.enabled` | boolean | `true` | 对所选 executable 离线运行 `plugin validate/test`；通过后只为本次子进程加载随包 observer |
 | `mods.handshakeTimeoutMs` | integer | `8000` | 启动输入提交前等待 tool 注册完成，范围 1–30000 ms；超时关闭空查询并回 MCP |
 | `goal.enabled` | boolean | `true` | 存在宿主 goals 服务时提供 get/create/update 工具与策略提示；关闭不影响 observer |
