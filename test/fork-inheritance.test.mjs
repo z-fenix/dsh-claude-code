@@ -21,6 +21,8 @@ mock.module("@anthropic-ai/claude-agent-sdk", {
 });
 const { runClaudeCode } = await import("../lib/claude-run.mjs");
 const { isForkedSession, forkResumeHint } = await import("../lib/fork.mjs");
+const { PluginFacts } = await import("../lib/plugin-facts.mjs");
+const { load: loadClaudeSessionId } = await import("../lib/store.mjs");
 
 const ev = (type, data) => ({ type, data, seq: 0 });
 let sessionSeq = 0;
@@ -58,6 +60,23 @@ test("父会话没有 Claude id 时不做无根据的 resume（fork 仍可新建
   const hint = await forkResumeHint({ sessionId: "session-c", header: { isSeeded: true, parentSession: "session-p" }, load: async () => undefined });
   assert.equal(hint, undefined);
   assert.equal(await forkResumeHint({ sessionId: "s", header: { isSeeded: false }, load: async () => "x" }), undefined);
+});
+
+test("旁路表没记到父会话时，私有事实里的那份仍能让 fork 继承历史", async () => {
+  // 端到端串起「两处记录 → 恢复优先级」：父的映射只存在于私有事实里
+  // （旁路表漏写/被半截文件覆盖的真实形状），分叉仍要拿到父的 Claude id 并标记 fork。
+  const root = process.env.DSH_CLAUDE_CODE_STORE;
+  const events = [];
+  const parent = { id: "session-p", header: { createdAt: 1, cwd: "/w" }, snapshotEvents: () => events };
+  const facts = new PluginFacts(parent, { root });
+  facts.append("claude-code/session", { claudeSessionId: "claude-parent" });
+  facts.close();
+  const hint = await forkResumeHint({
+    sessionId: "session-c",
+    header: { isSeeded: true, parentSession: "session-p" },
+    load: loadClaudeSessionId,
+  });
+  assert.deepEqual(hint, { claudeSessionId: "claude-parent", fork: true });
 });
 
 test("fork 只与 resume 一起下发；没有父可续时不发 forkSession", async () => {

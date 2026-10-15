@@ -123,6 +123,48 @@ test("logIntact=false 时回合不补 turn/end，也不派发 turn-stopping", as
   }
 });
 
+test("捕获到的 Claude 会话 id 落成私有事实，且 id 不变时不重复写", async () => {
+  runResult = { output: [{ type: "text", text: "ok" }], stopReason: "completed", claudeSessionId: "claude-1", logIntact: true };
+  const { session, agent } = await driveOneTurn();
+  const records = () => session.factRecords.filter((record) => record.type === "claude-code/session");
+  assert.equal(records().length, 1, "首轮捕获后应当有且仅有一条 session 事实");
+  assert.equal(records()[0].data.claudeSessionId, "claude-1");
+
+  // 第二轮：同一 Claude 会话 id 不变 → 不再 fsync 一条同样的记录。
+  agent.inbox.enqueue("next-turn", { id: "human-2", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "again" }] }, true);
+  agent.wakeDriver();
+  await agent.whenIdle();
+  assert.equal(runCalls.length, 2, "第二轮应当真的跑过");
+  assert.equal(records().length, 1, "id 没变就不该重复落盘");
+
+  // 换了 Claude 会话 id（例如每轮新开会话）→ 追加一条，恢复时以最后一条为准。
+  runResult = { ...runResult, claudeSessionId: "claude-2" };
+  agent.inbox.enqueue("next-turn", { id: "human-3", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "again" }] }, true);
+  agent.wakeDriver();
+  await agent.whenIdle();
+  assert.deepEqual(records().map((record) => record.data.claudeSessionId), ["claude-1", "claude-2"]);
+  await agent.dispose();
+  runResult = { output: [{ type: "text", text: "ok" }], stopReason: "completed", logIntact: true };
+});
+
+test("私有事实写失败不打断回合（只有那条记录丢失）", async () => {
+  const { session, agent } = await driveBatch(
+    [{ target: "next-turn", querying: true,
+      message: { id: "human", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hi" }] } }],
+    // 只让 session 事实那一条写失败：回合必须照常收尾，不能因为丢一条兜底记录就断掉。
+    { onCreated: ({ session: created }) => {
+      created.rejectFact = (record) => {
+        if (record.type === "claude-code/session") throw new Error("journal unavailable");
+      };
+    } },
+  );
+  const end = session.events.find((event) => event.type === "turn/end");
+  assert.ok(end, "事实写失败不该影响 turn/end");
+  assert.notEqual(end.data.reason?.kind, "error", "丢一条兜底记录不是回合错误");
+  assert.equal(session.factRecords.some((record) => record.type === "claude-code/session"), false);
+  await agent.dispose();
+});
+
 test("日志拒写后停止整个驱动，后续 followup 留在 inbox", async () => {
   const timeline = [];
   const session = fakeSession(timeline);
