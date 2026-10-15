@@ -78,9 +78,14 @@ step/end
 
 **改动文件卡片的覆盖边界（插件会话）。** `dsh-workspace-changes` 记录器有两条采集途径：
 `tools/pre-execute` 里「编辑前整文件捕获」，以及轮内快照对比。Claude Code 的文件编辑发生在
-CLI 进程内，不经过 DSH 的 `tools/pre-execute`，所以前一条路对插件会话**永远不触发**。工作区
-在 git 仓库内时，快照对比仍能完整覆盖；工作区不在任何 git 仓库内时，插件会话的改动文件
-卡片将基本为空（shell 改动同样不计）。这是宿主记录器的规则，本插件无法绕过，属已知边界。
+CLI 进程内，不经过 DSH 的工具注册表，所以插件在 `canUseTool` 里**替它们补派发一次**
+`tools/pre-execute`（`lib/host-tool-gate.mjs`，经 agent-scope 派发器），宿主监听器因此能看到
+Claude 的文件工具。工作区不在任何 git 仓库内时，宿主记录器只剩捕获一条来源（`baseline === null`
+时 `listed` 恒空，每个捕获路径都算「未被快照覆盖」），卡片由此仍有内容；工作区在 git 仓库内时
+快照对比照旧是主来源。**只覆盖记录器认得出路径的形状**：wire 名 `write`（带 `content`）与 `edit`
+（带 `old_string` + `new_string`）会捕获；Claude 的 `MultiEdit`（入参是 `edits` 数组）与
+`NotebookEdit`（入参是 `notebook_path`）虽然同样被派发，但 `mutationPath` 取不到路径，**不产生改动前
+捕获**——插件不改写入参去迁就记录器，那会让监听器看到的参数与实际执行的调用不一致。shell 改动同样不计。
 
 **用量必须与消息同一条事件落盘。** `dsh-token-meter` 的 `usageOf()` 只读
 `assistant/message.data.usage`，或它内嵌 `stream` 里最后一个 `usage` 分片。而 Claude 的用量
