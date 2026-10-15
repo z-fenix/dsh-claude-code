@@ -148,7 +148,7 @@ Claude 历史（`forkSession`）、会话所选模型/effort 真正转发、工�
 
 | 项 | 卡在哪 | 谁能解开 |
 |---|---|---|
-| 实际 Claude compact（DSH `/compact` 压不到 CLI 的真实上下文） | SDK 控制请求里有 interrupt / 权限 / 模型，**没有 compact**；CLI 自触发压缩用的内部 `isMeta` 标记不是 `SDKUserMessage` 的字段 | Claude Agent SDK / CLI 暴露压缩请求，或允许插件注入该标记 |
+| 实际 Claude compact（DSH `/compact` 压不到 CLI 的真实上下文） | SDK 控制请求里有 interrupt / 权限 / 模型，**没有 compact**；CLI 自触发压缩用的内部 `isMeta` 标记不是 `SDKUserMessage` 的字段。插件会话里按 `/compact` 走宿主 compaction，它需要一个总结用的 LLM 调用、按会话模型路由回插件刻意休眠的 `claude-code` provider，于是立刻失败并记 `compaction/end.error`（实机核验 2026-10-15） | Claude Agent SDK / CLI 暴露压缩请求，或允许插件注入该标记 |
 | 可续跑子代理 / workflow | 子代理活在**父查询进程内**，父查询结束转录只读；SDK 没有「给子代理发消息 / 恢复子代理」的控制请求，CLI 的 `SendMessage` 是**模型手里的工具** | Claude Code 暴露子代理会话地址，或允许父进程代发消息 |
 | DSH 面板里的真实 context 分项 | 分项是宿主自己的启发式估计；Claude 的真实分项只存在于 CLI 进程内，插件没有写入通道 | DSH 开放分项注入 seam，或 SDK 上报分类用量 |
 
