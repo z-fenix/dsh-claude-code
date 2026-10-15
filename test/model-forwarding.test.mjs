@@ -75,3 +75,33 @@ test("空 model 的选择不采信（不把空串当模型名发给 CLI）", asy
   await run([ev("model/selection", { provider: "local", model: "" })]);
   assert.equal(capturedOptions[0].model, undefined);
 });
+
+// 宿主在创建 agent 时把模型路由随 agentOptions 传下来（dsh-api-session-controller 的
+// agentOptions()，取 agentDefaultModel 的进程默认值 → agent.options）。会话内没选过模型
+// （没有 model/selection 事件，真正切换才写）时，这个值就是前端选择器显示的那个；
+// 插件若只认会话事件，SDK 收不到模型，CLI 就用自己的默认模型计费，出现「选择器显示 A、
+// 实际按 B 计费」（隔离环境实测：界面 deepseek-flash，request/header 记为
+// ccs-claude-openai--gpt-6.1-sol[1m]）。
+test("会话内没选过模型 → 用宿主解析给 agent 的模型，前端选择与实际请求一致", async () => {
+  capturedOptions = [];
+  await run([ev("sandbox/mode", { mode: "workspace-write" })],
+    { agent: { id: "a1", status: "running", options: { provider: "local", model: "ccs-claude-deepseek--deepseek-flash" } } });
+  assert.equal(capturedOptions[0].model, "ccs-claude-deepseek--deepseek-flash");
+});
+
+test("会话里选过模型时仍以会话选择为准（覆盖宿主的默认路由）", async () => {
+  capturedOptions = [];
+  await run([ev("model/selection", { provider: "local", model: "m-session", reasoningEffort: "max" })],
+    { agent: { id: "a1", status: "running", options: { provider: "local", model: "m-default" } } });
+  assert.equal(capturedOptions[0].model, "m-session");
+  assert.equal(capturedOptions[0].effort, "max");
+});
+
+test("宿主的模型不是非空字符串时不透传（不给 CLI 发空串/类型错误）", async () => {
+  for (const model of [undefined, "", 42, { name: "m" }]) {
+    capturedOptions = [];
+    await run([ev("sandbox/mode", { mode: "workspace-write" })],
+      { agent: { id: "a1", status: "running", options: { provider: "local", model } } });
+    assert.equal(capturedOptions[0].model, undefined, `model=${JSON.stringify(model)} 不应透传`);
+  }
+});

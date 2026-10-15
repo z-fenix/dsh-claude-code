@@ -249,6 +249,18 @@ goal: {
    `lib/goal-domain.mjs`）。**测试盲区**：`wireGoalFixture` 在裸 `new Context()` 上 `provide`，
    属性访问不受 inject 限制，所以只有包裹代理的用例（`test/agent.test.mjs`「宿主不把 goals
    暴露成 ctx 属性时…」）能复现。新增任何对宿主服务的读取都必须走 `ctx.get`。
+7. **宿主模型路由必须显式透传（2026-10-15 修复「选择器与计费不一致」）。** Claude Code 模式下
+   若本插件不设 SDK 的模型，CLI 就用**自己**的默认模型（隔离环境实测
+   `ccs-claude-openai--gpt-6.1-sol[1m]`），而 DSH 前端选择器显示的是宿主解析的有效模型，
+   于是界面显示 A、实际按 B 计费。宿主的解析链（`dsh-api-session-controller`）是：
+   会话内 pending 选择 → 已记录的 `request/header` → `agentDefaultModel` 进程默认值。
+   其中会话内选择经 `selectForNextRequest` 落成 `model/selection` 事件（**只在真正切换时才写**），
+   进程默认值则作为 `agentOptions` 在创建 / resume agent 时传下来（→ `ClaudeCodeAgent.options`）。
+   本插件只复刻前两支、顺序一致：`foldModelSelection(会话事件) ?? agent.options.model`
+   （`lib/claude-run.mjs` 的 `hostModelSelection`，只采信非空字符串）。
+   **不**复刻「已记录的 `request/header`」一支：那是本插件自己写下的历史值，照抄会把第一次
+   写错的那个模型永久固化。残留风险：宿主默认模型若 CLI 不认，回合会显式报错，
+   而不是像修复前那样静默按另一个模型计费（后者更隐蔽，故选前者）。
 
 ## 9. 交付物
 
