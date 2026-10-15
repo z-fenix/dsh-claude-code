@@ -164,6 +164,7 @@ DSH 前端按 wire 工具名分类渲染；未命中的名字会落进通用卡�
 | Claude Code | DSH wire |
 |---|---|
 | `Bash` / `BashOutput` / `KillShell` | `bash` |
+| `PowerShell`（Windows 上 CLI 的 shell 工具，入参同为 `command`） | `bash` |
 | `Read` | `read` |
 | `Write` | `write` |
 | `Edit` / `MultiEdit` / `NotebookEdit` | `edit` |

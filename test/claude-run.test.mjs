@@ -855,6 +855,9 @@ test("request/header 未变化时不重复写", () => {
 
 test("工具名 / 入参映射", () => {
   assert.equal(mapToolName("Bash"), "bash");
+  // Windows 上本机 CLI 报的是 `PowerShell`（工具表里没有 Bash）；入参形状与 Bash 相同，
+  // 映射到同一个 wire 名，界面才会用命令卡片渲染而不是落进通用卡片。
+  assert.equal(mapToolName("PowerShell"), "bash");
   assert.equal(mapToolName("WebFetch"), "web_fetch");
   assert.equal(mapToolName("Agent"), "subagent");
   assert.equal(mapToolName("Unknown"), "Unknown");

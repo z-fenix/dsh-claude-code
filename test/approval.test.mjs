@@ -320,6 +320,44 @@ test("read-only：Bash 默认直接拒绝，且不弹审批（命令是否写文
   assert.match(result.message, /engines\.claude-code\.readOnlyBash/);
 });
 
+// 实机核验（2026-10-15，隔离 web 实例）：本机 CLI 在 Windows 上把 shell 工具报成 `PowerShell`
+// ——`system/init` 的工具表里根本没有 `Bash`。于是 read-only 会话里 `PowerShell` 的
+// `Set-Content -Path probe.txt …` 被送到审批 seam，用户点「允许一次」就能在只读会话里写文件。
+// 那正是这条策略要堵的口子：只读会话能用只读命令是 CLI 自己的判断（那一次它没调 canUseTool），
+// 但**可写命令**必须在这里被硬拒绝。
+test("read-only：Windows 的 shell 工具（PowerShell）与 Bash 同策略，直接拒绝且不弹审批", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined) };
+  const canUseTool = makeCanUseTool(ctx, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]),
+    agent: { id: "a1" },
+  });
+  const result = await canUseTool("PowerShell", { command: "Set-Content -Path probe.txt -Value hi" });
+  assert.equal(result.behavior, "deny");
+  assert.equal(approvals.length, 0, "只读会话不能靠「允许一次」把 PowerShell 的写入放出来");
+  assert.match(result.message, /read-only/);
+  assert.match(result.message, /engines\.claude-code\.readOnlyBash/);
+});
+
+test("read-only：显式配 readOnlyBash=ask 时 PowerShell 也退回审批 seam（策略按整类 shell 工具生效）", async () => {
+  const approvals = [];
+  const ctx = { get: (key) => (key === "approval"
+    ? { request: async (request) => { approvals.push(request); return "allowed-once"; } }
+    : undefined) };
+  const canUseTool = makeCanUseTool(ctx, {
+    cwd: "/w",
+    session: sessionWith([ev("sandbox/mode", { mode: "read-only" })]),
+    agent: { id: "a1" },
+    readOnlyBash: "ask",
+  });
+  const result = await canUseTool("PowerShell", { command: "Get-ChildItem" });
+  assert.equal(approvals.length, 1, "放宽策略对 Bash 与 PowerShell 一视同仁");
+  assert.equal(result.behavior, "allow");
+});
+
 test("read-only：显式配 readOnlyBash=ask 才退回审批 seam", async () => {
   const approvals = [];
   const ctx = { get: (key) => (key === "approval"

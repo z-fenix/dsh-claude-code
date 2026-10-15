@@ -18,7 +18,7 @@
 - **🎯 Claude Code in one step** — declares a `claude-code` agent preset plus an engine; select it and the session is driven by the local Claude Code CLI.
 - **📡 Live trajectory** — text, thinking, tool calls, and tool results stream into the DSH session as they happen (`agent/assistant-stream` frames plus the durable `assistant/message`).
 - **📊 Context occupancy** — Claude Code's token usage and model context window are written to the session log (`assistant/message.usage` + `request/context`), so the GUI shows context pressure and composition like it does natively.
-- **🔐 Approval bridge** — DSH mode and approval policy map onto Claude's `canUseTool`; only an in-workspace `blockedPath` in `workspace-write` can pass automatically. Under `read-only`, file tools and `Bash` are denied outright (see Known limitations). `AskUserQuestion` uses the DSH question UI. Claude's **file tools** are additionally dispatched into the host's `tools/pre-execute`, so the host's change cards and hooks can see them and a host `deny`/`cancel` is honored (see Known limitations). This is not DSH's OS-level sandbox.
+- **🔐 Approval bridge** — DSH mode and approval policy map onto Claude's `canUseTool`; only an in-workspace `blockedPath` in `workspace-write` can pass automatically. Under `read-only`, file tools and shell tools (`Bash`, or `PowerShell` on Windows) are denied outright (see Known limitations). `AskUserQuestion` uses the DSH question UI. Claude's **file tools** are additionally dispatched into the host's `tools/pre-execute`, so the host's change cards and hooks can see them and a host `deny`/`cancel` is honored (see Known limitations). This is not DSH's OS-level sandbox.
 - **🧰 Claude-owned execution** — the preset is a routing key; Claude uses its own tools and context, and the preset's persona sections are forwarded explicitly. DSH preset tools are not automatically forwarded.
 - **⏯️ Exact resume** — the Claude session id is persisted on the side (a sidecar table plus a private fact), so a resumed chat continues the *same* Claude session.
 - **🌐 Subagent trajectories** — Claude's built-in `Agent`/`Task` children appear as one-shot, read-only child sessions with short task labels and real run status. Provider identity stays in the descriptor; automatic titles are not emitted without legitimate human source messages. DSH-native delegation remains on the native loop.
@@ -77,7 +77,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
           # names: [present, job_list, job_output, job_kill] # audited subset only
         env: {}
         contextWindow: 200000
-        readOnlyBash: deny             # Bash under read-only: deny (default) / ask (per-command approval)
+        readOnlyBash: deny             # shell tools (Bash/PowerShell) under read-only: deny (default) / ask (per-command approval)
         # sandbox:                     # optional: pass the SDK SandboxSettings through (real sandbox on Linux/macOS only)
         #   enabled: true
 ```
@@ -95,7 +95,7 @@ Edit `~/.dsh/profiles/desktop/cordis.patch.yml` and override by row id:
 | `engines.claude-code.traceSubagents` | `true` | Map Claude's internal subagents to read-only DSH child sessions |
 | `engines.claude-code.env` | `{}` | Extra environment for the claude subprocess |
 | `engines.claude-code.contextWindow` | unset | Manual context window (tokens) fallback |
-| `engines.claude-code.readOnlyBash` | `deny` | Strategy for `Bash` under read-only: `deny` outright (no prompt) / `ask` restores per-command approval |
+| `engines.claude-code.readOnlyBash` | `deny` | Strategy for shell tools (`Bash`, or the CLI's `PowerShell` on Windows) under read-only: `deny` outright (no prompt) / `ask` restores per-command approval |
 | `engines.claude-code.sandbox` | unset | Passed through verbatim to the SDK `query()` `SandboxSettings`; nothing is passed when unset. Not DSH's sandbox, and inert on Windows |
 | `engines.claude-code.mods.enabled` | `true` | Validate/test the selected CLI and load the packaged observer only into its subprocess |
 | `engines.claude-code.mods.handshakeTimeoutMs` | `8000` | Pre-input ready timeout, 1–30000 ms; fallback starts a new MCP query without resending input |
