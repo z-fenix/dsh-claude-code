@@ -188,6 +188,19 @@ const childTexts = (child) => child.appended
 // tool_result，真正的产出随后作为 parent_tool_use_id 命中的转发消息到达，完成信号是
 // system/task_notification。旧实现把这个**启动回执**当成子代理结束，子会话当场被收尾，
 // 之后所有转发消息都被 #closedToolUseIds 丢弃——子会话里一条内容都不剩。
+test("原生身份关联只查已有 tool-use 投影，不创建第二份子会话", async () => {
+  const { manager, host, child } = makeManager();
+  assert.equal(manager.childSessionIdForToolUseId("call-link"), undefined);
+  assert.equal(host.sessions.created.length, 0);
+  manager.handleMessage(spawnMessage("call-link", { description: "identity" }));
+  await settle();
+  assert.equal(manager.childSessionIdForToolUseId("call-link"), child().id);
+  assert.equal(manager.childSessionIdForToolUseId("unknown-native-id"), undefined);
+  assert.equal(host.sessions.created.length, 1);
+  manager.finishRun();
+  await settle();
+});
+
 test("子会话没有人类消息来源时不写自动标题或伪造人类输入", async () => {
   const { manager, child } = makeManager();
   manager.handleMessage(spawnMessage("tool-title-source", {

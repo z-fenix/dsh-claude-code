@@ -133,27 +133,54 @@ SDK `system/ui_log` 发送一次固定脱敏诊断；宿主记录 `claude-code/m
 同一 API 响应的多个 assistant 分块按 `message.id` 聚合，工具结果成对落盘。真正缺失结果仍记录兜底
 错误以避免日志损坏；不会因并行 Read/Grep 分块就提前写 interrupted。旧历史中的误报不自动重写。
 
+## 原生 Plan、工具生命周期与元数据
+
+**Plan。** 会话的 DSH plan mode 会同步成 CLI 的 `permissionMode: "plan"`；`pending` 只在真实主 step
+边界提交成 `plan/mode`，读取失败按不可用失败关闭。`ExitPlanMode` 的正文从 CLI 固定 plan 文件读取，
+再经 DSH 选择题请人审；Full access 下同样要审。审阅只认这次 tool-use ID：审阅期间文件被改、DSH 已退出
+plan mode、正文超限或不以标题开头都重新拒绝。模型口头“计划已批准”不构成批准。plan 文件只允许主循环写。
+只有 Mod 不可用时才明确失败并提示使用 `/plan`，不伪造审阅。
+
+**工具生命周期。** Mod 的 `tool.check`/`tool.call`、SDK `PreToolUse` 与 `canUseTool` 共享按真实
+tool-use ID 的 gate。Mod 身份先到、SDK 回调后到时合并为同一次调用；同一次调用只派发一次宿主
+`tools/pre-execute`。参数改写只允许审计过的自由字段，身份字段、必填字段删除和类型变化一律拒绝。审计事实
+`claude-code/tool-lifecycle`、`claude-code/step-control` 只记工具名、调用 ID、归属、决策与结果，不记参数
+正文、thinking 或工具结果。零推理探针（真实 CLI + 本地固定 stub）验证了 Write/Edit 各一次 gate、各一次
+审批，且改写值真正落盘。
+
+**原生元数据。** `/claude-context`（上下文摘要，`tokens` 为 API 报告值，分类为 CLI 估算）、
+`/claude-commands`（命令/技能目录，128/128/512 字符上限）、`/claude-command status|cost`（固定只读内置）
+与 `/claude-skill <name> [args]`（配置允许列表 ∩ SDK 当前观察到，普通人类 user 输入排队）。这些命令只观察，
+不授予执行权；`status` 在当前 CLI 返回 `uncertain` 时明确失败。子代理身份早于 SDK 投影时保持 unknown，
+等真实 spawn 证据再绑定，不写两份子轨迹。
+
+**模型/effort。** 会话选择变化经 `turn.step` 只改写主循环请求；子代理保持原生模型，CLI 自己的 fallback
+不被重置。以上均为“只改变化字段”，不新开查询、不重建会话。
+
 ## 验证与后续阶段
 
 `pnpm test` 覆盖输入、审批、goal、mod host、prompt、轨迹和路由；native v4 校验离线验证事件关系。
 真实桌面/模型调用没有纳入离线通过声明，需单独批准预算。链接安装修改后重启 DSH 重新加载源码。
 
 第二、三期**已交付**的部分：宿主 persona 段落按项桥接（`lib/host-persona.mjs`）、DSH fork 继承
-Claude 历史（`forkSession`）、会话所选模型/effort 真正转发、工具结果里的图片落成附件引用
-（`lib/tool-result-images.mjs`，只有「轨迹」视图画图）、Claude 文件工具补派发进宿主
+Claude 历史（`forkSession`）、会话所选模型/effort 真正转发且只作用于后续主 step、工具结果里的图片落成
+附件引用（`lib/tool-result-images.mjs`，只有「轨迹」视图画图）、Claude 文件工具补派发进宿主
 `tools/pre-execute`（`lib/host-tool-gate.mjs`，非 Git 工作区也能出改动卡片）、scope-aware 工具桥
-（默认关闭，仅 `present` / `job_*` 白名单）、SDK 沙箱透传 + `read-only` 硬拒绝。
+（默认关闭，仅 `present` / `job_*` 白名单，支持 `mcp` / `mod` / `auto`）、SDK 沙箱透传 + `read-only`
+硬拒绝、原生 Plan 桥与 plan-review、共享工具生命周期 gate、原生元数据命令、动态 Mod 工具传输。
 
-**仍未交付的三项，卡在宿主/CLI 一侧**（不是插件没写，也不是「以后再说」）：
+**仍未交付/仍未验收**：
 
 | 项 | 卡在哪 | 谁能解开 |
 |---|---|---|
-| 实际 Claude compact（DSH `/compact` 压不到 CLI 的真实上下文） | SDK 控制请求里有 interrupt / 权限 / 模型，**没有 compact**；CLI 自触发压缩用的内部 `isMeta` 标记不是 `SDKUserMessage` 的字段。插件会话里按 `/compact` 走宿主 compaction，它需要一个总结用的 LLM 调用、按会话模型路由回插件刻意休眠的 `claude-code` provider，于是立刻失败并记 `compaction/end.error`（实机核验 2026-10-15） | Claude Agent SDK / CLI 暴露压缩请求，或允许插件注入该标记 |
+| 真实 Claude compact 的付费摘要验收 | `/compact` 已进入受限维护通道并通过原生命令执行，零推理探针也拿到结构化结果；但真正的摘要模型调用是付费生成，尚未授权运行 | 需要单独批准的付费验收预算 |
 | 可续跑子代理 / workflow | 子代理活在**父查询进程内**，父查询结束转录只读；SDK 没有「给子代理发消息 / 恢复子代理」的控制请求，CLI 的 `SendMessage` 是**模型手里的工具** | Claude Code 暴露子代理会话地址，或允许父进程代发消息 |
 | DSH 面板里的真实 context 分项 | 分项是宿主自己的启发式估计；Claude 的真实分项只存在于 CLI 进程内，插件没有写入通道 | DSH 开放分项注入 seam，或 SDK 上报分类用量 |
 
 同一类边界还有一条：`read-only` 的写限制与 SDK 沙箱透传已落地，但「让 Claude 的工具走 DSH 的文件/
 进程执行器」需要宿主把 CLI 的执行纳入自己的执行器，属宿主侧改造。
 
-**插件刻意不做的一项**：skills 不是 prompt 段落而是 DSH 的 `skill` 工具，补齐属新工具桥条目、需单独
-审计批准（见 README 的工具桥白名单）。未经各期审批，不自动扩大实现范围。
+**Skills 的现状**：skills 不是 prompt 段落，也不是任意工具桥。`/claude-skill` 只接受“配置允许列表 ∩
+SDK 当前观察到”的技能，以普通人类 user 输入排队，参数原样保留；它不开放 DSH `skill` 工具，也不扩大
+模型可自行调用的工具面。P1–P3 的实现以真实 CLI + 本地零推理 stub 验证；真实付费生成、正式桌面/v4
+生命周期验收未运行，不能据此宣称通过。

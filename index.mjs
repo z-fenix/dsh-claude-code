@@ -70,7 +70,7 @@ const ENGINE_DEFAULTS = {
    */
   sandbox: undefined,
   /** 按所选 CLI 的实际能力捕获 compose 快照，不改用户全局插件配置。 */
-  mods: { enabled: true, handshakeTimeoutMs: 8000 },
+  mods: { enabled: true, handshakeTimeoutMs: 8000, skills: { allowed: [] } },
   /**
    * DSH 侧工具桥：把 agent scope 里**白名单点名**的几个 DSH 工具按 MCP 暴露给 Claude。
    * 显式开启后默认只桥 Claude 没有对等物、且日志影响面已核对的几支（present / job_*）；
@@ -131,7 +131,7 @@ export const claudeCodeEngine = {
   makeAgent(loopCtx, id, options, session, engineConfig) {
     const config = { ...ENGINE_DEFAULTS, ...(engineConfig ?? {}),
       goal: { ...ENGINE_DEFAULTS.goal, ...engineConfig?.goal },
-      mods: { ...ENGINE_DEFAULTS.mods, ...engineConfig?.mods },
+      mods: { ...ENGINE_DEFAULTS.mods, ...engineConfig?.mods, skills: { ...ENGINE_DEFAULTS.mods.skills, ...engineConfig?.mods?.skills } },
       dshTools: { ...ENGINE_DEFAULTS.dshTools, ...engineConfig?.dshTools },
     };
     const machine = new ClaudeCodeAgent(loopCtx, id, options, session, config);

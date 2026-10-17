@@ -1,4 +1,6 @@
-# 真实 Claude compact：接口现状与结论
+# 真实 Claude compact：旧通道历史调查（2026-10-13）
+
+> **2026-10-16 更新**：下文保留当时 SDK/普通用户消息通道的调查，不再代表插件的当前能力。现在使用 scoped Mod 的 `$.command.run({ command: "compact" })` 和独立结果观察器进入原生压缩；CLI 2.1.301 的零推理探针已验证零用户输入 resume、历史可见、manual compact 和结构化 skip 凭据（0 API 请求）。直接 `$.session.compact()` 在 SDK/headless 仍被明确拒绝。真实收费摘要及桌面验收尚未执行。当前设计见 `2026-10-16-native-compact-mod-design.md`。
 
 本文件记录第二期「`/compact`、自动压力与超限恢复作用于 Claude 实际上下文」这一项的只读调查。
 结论是**插件无法触发 Claude 的真实压缩**，理由有接口层与实测两层；能做的只有「不再误导用户」

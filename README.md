@@ -16,6 +16,8 @@
 ## ✨ 能干什么
 
 - **🎯 一键接入 Claude Code**：声明一个 `claude-code` agent 预设 + 一个引擎，选中它，会话就交给本机 Claude Code CLI，零配置自动对上。
+- **🧭 原生 Plan 桥**：会话的 DSH plan mode 同步成 CLI 的 plan 权限模式。`ExitPlanMode` 不把模型自己写的“计划”当批准：插件从 CLI 固定的 plan 文件读取正文，在 DSH 选择题里请人审；Full access 下同样要审。审阅期间文件被改、工具调用 ID 对不上都重新拒绝；只有主循环能写原生 plan 文件，子代理不能借道。
+- **🧾 工具调用生命周期**：Mod 的 `tool.check`/`tool.call` 与 SDK `PreToolUse`、`canUseTool` 共用同一个按真实 tool-use ID 的宿主 gate —— 同一次文件调用只派发一次宿主 `tools/pre-execute`，参数重写只允许审计过的自由字段；审计台账只记工具名、调用 ID、归属与结果，不记参数正文。
 - **📡 轨迹实时可见**：文本、思考、工具调用与结果，每一步都实时流进 DSH 会话（`agent/assistant-stream` 实时帧 + `assistant/message` 落盘）。
 - **📊 上下文占用可见**：把 Claude Code 的 token 用量与模型上下文窗口写进会话日志（`assistant/message.usage` + `request/context`），像 DSH 原生一样显示上下文占用与构成。
 - **🔐 权限桥接**：DSH 的模式和审批策略映射到 Claude 的 `canUseTool`；仅 `workspace-write` 的工作区内 `blockedPath` 可自动放行，其他需要权限的调用按策略处理。`read-only` 下文件工具与 shell 工具（`Bash`／Windows 上 CLI 报的 `PowerShell`）一律拒绝（见「已知限制」）。`AskUserQuestion` 用 DSH 的选择题 UI 作答。另外把 Claude 的**文件工具**补派发进宿主 `tools/pre-execute`：宿主的改动文件卡片与钩子因此看得见它们，宿主返回的拒绝/取消也照办（见「已知限制」）。这不是 DSH 操作系统沙箱。
@@ -24,6 +26,8 @@
 - **🌐 子代理轨迹**：Claude 内建 `Agent` / `Task` 子代理映射成 one-shot 只读子会话，显示短任务标签和真实运行状态；provider 保留在描述符里，没有合法人类消息来源时不伪造自动标题。原生 DSH 委派仍由宿主原生循环负责。
 - **⌨️ 运行中输入**：普通 followup 排队到下一轮，steer 进入活查询，inject 不自行启动查询；显式取消先请求 SDK interrupt，再关闭查询。保留原始消息来源、图片和投递台账。
 - **🧩 按能力加载 mods**：随包的 `dsh-bridge` mod 只加载到当前 Claude 子进程；可观察 prompt.compose、可选适配 goal 工具。不改全局插件设置，不修改 DSH 宿主包。
+- **🧾 原生能力目录**：`/claude-context` 看最近一次 CLI 上下文摘要，`/claude-commands` 看命令与技能目录，`/claude-command status|cost` 运行固定的只读原生命令，`/claude-skill <name> [args]` 以人类回合调用“允许列表 ∩ SDK 实际观察到”的技能。元数据有上限、只作观察，不冒充执行授权；当前 CLI 的 `status` 返回 uncertain 时会明确失败，不伪造成功。
+- **🎛️ 运行中切换模型/档位**：会话里的 `model/selection` 变化只改后续**主** step 的请求；子代理保持原生路由，也不会重置 CLI 自己的 fallback 选择。
 - **🎯 目标式自动任务**：选中 Claude Code 预设的会话支持标准模式那套 goal —— 输入 `/goal <目标>` 后自动一轮轮推进，Claude 用桥接的 `get_goal`/`update_goal` 读取并把目标收尾（complete/blocked）。开关 `engines.claude-code.goal.enabled`，默认开。
 
 ## 🚀 安装
@@ -74,6 +78,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
           # defaultMaxGoalRounds: 256      # 可选：模型未给 max_goal_rounds 时的兜底
         dshTools:
           enabled: false                 # 显式改 true 才桥接原生交付物 / jobs
+          transport: mcp                 # mcp（默认）/ mod / auto；mod 动态注册，失败回 MCP
           # names: [present, job_list, job_output, job_kill] # 只能缩小这个审计白名单
         env: {}                          # 例如 { ANTHROPIC_API_KEY: sk-... }
         contextWindow: 200000            # 可选：SDK 取不到时兜底
@@ -104,6 +109,7 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 | `engines.claude-code.goal.blockedAfterConsecutiveRounds` | `3` | 同一阻塞条件连续达到多少个 goal round 才允许模型标记 `blocked` |
 | `engines.claude-code.goal.defaultMaxGoalRounds` | 未配置 | 模型调 `create_goal` 未给上限时的兜底轮数（默认走 DSH 的 256） |
 | `engines.claude-code.dshTools.enabled` | `false` | 显式开启 scope-aware DSH 工具桥；与 goal 的 transport 独立 |
+| `engines.claude-code.dshTools.transport` | `mcp` | `mcp` 保持兼容；`mod`/`auto` 在 mod 可用时动态注册（`mcp__dsh-bridge__*`），握手失败回 MCP；一次查询只选一套 |
 | `engines.claude-code.dshTools.names` | `[present, job_list, job_output, job_kill]` | 仅可配置这个审计白名单的子集；空数组不注册 server，未知名字/非数组报错 |
 
 ## 🔍 原理（可选阅读）
@@ -127,7 +133,10 @@ dsh plugin --profile desktop add /绝对路径/dsh-claude-code
 
 - **Claude 的文件工具会被补派发进宿主 `tools/pre-execute`（新增的宿主可见面）**。`Write` / `Edit` / `MultiEdit` / `NotebookEdit` 在 CLI 进程内执行、不经过 DSH 的工具注册表，插件因此在 `canUseTool` 里按宿主的载荷形状（`name` 取 wire 名、`arguments`、`callId`、`agent`、`signal`，经 agent-scope 派发器）替它们派发一次该 waterfall（`lib/host-tool-gate.mjs`）。三点后果：(1) `dsh-workspace-changes` 的「编辑前整文件捕获」从此对插件会话生效——**工作区不在任何 git 仓库内时也能出现改动文件卡片**（实机核验 2026-10-15：非 git 工作区里 `Edit` 一次，卡片显示 `已编辑 m4-notes.txt +1 -1`，diff 的「改前」是真实内容；那工作区里没有别的来源能给出改前内容）；(2) 宿主其它 pre-execute 监听器（例如 `dsh-hooks-claude-code` 的 PreToolUse 钩子）现在也会看到这些调用——这是刻意对齐 DSH 的行为；(3) 监听器返回 `deny` / `cancel` 时按宿主的理由拒绝这次调用，返回 `ask` 时**取消所有自动放行**并落到 DSH 审批 seam（danger-full-access 下也问一次，因为那是监听器明确要求的），监听器抛错一律 fail-closed 成拒绝——与宿主注册表自身的语义一致。**未覆盖**：`MultiEdit`（入参 `edits` 数组）与 `NotebookEdit`（入参 `notebook_path`）虽然照样派发，但宿主记录器取不到路径、不产生改动前捕获（插件不改写入参去迁就它；宿主 `mutationPath` 对这四种形状的输出已离线核对）；派发的 exec 也没有注册表铸造的 `token` / `deferContext` / `concludeTurn`，监听器若靠这些字段改写参数或接管执行流程，在插件会话里不生效。
 
-- **`/compact` 改不了 Claude 的真实上下文**。DSH 的 `/compact` 走 `ctx.compaction.compactNow`，压的是 DSH 会话日志的 surface 节点；Claude 的真实上下文在 CLI 进程里，由 CLI 自己按阈值压缩。插件**无法**触发 CLI 的压缩：SDK 的控制请求里没有 compact，而 CLI 自己触发时用的内部 `isMeta` 标记也不在 `SDKUserMessage` 上（实测把 `/compact` 当普通消息提交只会得到一轮零 step 的空回合）。所以 Claude Code 会话里按 `/compact` **不会压缩任何一侧，而且会明确报错**：实机核验（2026-10-15，隔离 web 实例）显示该命令走宿主的 compaction，而宿主需要一个「总结用」的 LLM 调用、按会话模型路由回插件的 `claude-code` provider——那是条刻意休眠的路由（`lib/llm-route.mjs` 的 `stream()` 直接抛错，因为真正发出的请求由 CLI 自己装配），于是它立刻失败：会话日志记 `compaction/start` + `compaction/end`（`error: "dsh-claude-code: claude-code sessions are driven by the Claude Code CLI, not the dsh llm adapter"`），界面显示「Compaction could not produce a useful summary.」。**这是明确报错而不是静默无效**，用户至少能归因；长会话的自动压缩由 CLI 负责，代理不支持压缩请求时会以 `unrecognized_model … "query_source":"compact"` 硬失败并打挂整轮。详见 `docs/superpowers/specs/2026-10-13-claude-compaction-design.md`。**不过 CLI 自己的压缩不再是无声的**：它上报的边界与成败会记成 `claude-code/compact` 事实（带前后 token、耗时，失败时带 `compact_error`），压缩开始/成功/失败都可审计。DSH 面板的 context 分项是宿主自己的启发式估计，插件无法把 Claude 的真实分项喂进去（无接口），但压力条的分子/分母取的是真实用量与真实窗口。**要解开这两项都在别人那一侧**：真实 compact 需要 **Claude Agent SDK / CLI** 暴露压缩控制请求（或允许插件注入它自用的内部 `isMeta` 标记），真实 context 分项需要 **DSH 宿主**开放分项注入 seam（Claude 的分类用量只存在于 CLI 进程内）。插件侧没有可做的部分，故不再列为待办。
+- **Plan 桥和工具生命周期都按“真实身份 + 真实边界”工作，不把类型当证据。** DSH 的 plan mode（含 pending）只允许在真实 CLI 主 step 边界提交成 `plan/mode`，读取失败按不可用失败关闭，不会当成 inactive；`EnterPlanMode`/`ExitPlanMode` 不经过普通审批短路，Full access 下也必须走真实 plan-review。审阅只认这一次 tool-use ID：审阅期间 plan 文件被改、DSH 侧已退出 plan mode、正文超限或不以标题开头，都重新拒绝；模型说的“计划已批准”不算数。plan 文件只允许主循环写，子代理不能借父权限。工具侧共享一个按真实 tool-use ID 的 gate：Mod 身份先到、SDK 回调后到时合并成同一次调用；同一次调用只派发一次宿主 `tools/pre-execute`，参数改写只允许审计过的自由字段（其余原生约束保持原值），身份字段不可改。审计事实（`claude-code/tool-lifecycle`、`step-control`）只记工具名、调用 ID、归属、决策与结果，不记参数正文、thinking 或工具结果。**零推理验收**（真实 CLI + 本地固定 Messages stub）：一次 Write/Edit 各只派发一次 gate、各只审批一次，改写后的参数真正落盘，随后 Edit 读到的是改写值（`.dsh-diag/native-runtime-*`，`externalInference:false`）。
+- **原生元数据命令只观察，不授予执行权。** `/claude-context` 显示最近一次上下文摘要（`tokens` 是 API 报告值；分类是 CLI 估算，标 `estimated:true`、`detail:summary`）；`/claude-commands` 显示 SDK 观察到的命令/技能目录（上限 128 命令、128 技能、单条 512 字符）；`/claude-command status|cost` 只运行固定的只读原生命令，`status` 在当前 CLI 返回 `uncertain` 时明确失败而不是假装成功；`/claude-skill` 必须同时在配置允许列表和 SDK **当前**观察到的 skills 里，且以普通人类 user 输入排队，参数原样保留。上述目录数据不等于执行授权，也不会写进 DSH 原生 context 分项面板（宿主没有注入 seam）。身份绑定在子代理投影早于 SDK 事件时保持 unknown，等真实 spawn 证据再绑定，不为同一子会话写两份轨迹。
+- **模型/effort 的运行中切换只作用于后续主 step。** 会话选择变化经 Mod 的 `turn.step` 只改写主循环请求；子代理保持原生模型，CLI 自己的 fallback 选择不被重置。这是“只改变化字段”的实现，不是新开查询或重建会话。以上 P1–P3 能力均以真实 CLI + 本地零推理 stub 验证请求字段与执行边界；**真实付费生成、真实摘要、正式桌面/v4 生命周期验收仍未运行**，不能据此宣称通过。
+- **原生 compact 已接入受限维护通道，真实摘要仍需单独验收。** Claude Code 预设的 `/compact` 现在进入独占 `runMaintenance`，精确 resume 本会话的 Claude 历史，通过 Mod 的 `$.command.run({ command: "compact" })` 执行原生命令；不发送额外 SDK 用户 prompt，不走休眠 LLM provider，也不 shadow DSH 历史。完成凭据由单独加载的 `dsh-compact-observer` 以观察专属令牌回报，命令文案不充当成功证明。忙、Mods 不支持、`persistSession:false`、无历史或 fork 尚未物化时明确拒绝；领取后超时/取消/结果丢失保持 uncertain，不自动重试。默认维护上限 5 分钟，可用 `mods.maintenanceTimeoutMs` 缩短。**2026-10-16 零推理探针（CLI 2.1.301）**已证明零输入 resume 能进入含历史的原生 manual compact，并取得结构化 skip 凭据，API 请求数为 0；摘要模型被探针截断，**不等于收费摘要、真实桌面或完整持久化验收通过**。CLI 在 SDK/headless 下仍拒绝直接调用 `$.session.compact()`，不能只看类型判断支持。CLI 自动压缩及维护结果记在独立 `claude-code/compact`、`claude-code/native-operation` 台账；代理必须能服务真正的摘要请求。DSH 原生 context 分项面板仍无注入 seam，压力条保持真实 usage/window；取得 CLI 分项数据不等于能改宿主面板。当前设计见 `docs/superpowers/specs/2026-10-16-native-compact-mod-design.md`；旧通道调查保留在 `2026-10-13-claude-compaction-design.md`。
 
 - **预设的 `plugins` 列表就是会话的工具目录**。`@deepseek-ai/dsh-agent-preset` 把这里声明的行挂进 agent scope，会话能看到哪些工具完全由它决定；预设只写一行 persona，会话就一个工具都没有。本插件因此照搬 DSH 自带 `standard` 预设的工具集（`dsh-web-app` 的 `presets/standard.patch.yml`），只替换 persona 行。改预设时务必用宿主自己的 schema 校验，并保留 `test/cordis.patch.test.mjs` 里的回归护栏。
 - **预设绝不能重复声明 host plane 已注册的工具**。`@deepseek-ai/dsh-tools` 的 `tools.register()` 先注册到全局、再注册到 agent 作用域，**同层同名直接抛错**：

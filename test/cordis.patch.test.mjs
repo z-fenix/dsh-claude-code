@@ -191,13 +191,37 @@ test("preset 的每一行都有 id 与 name，且模块名可被解析", (t) => 
     const parts = name.split("/");
     const pkg = name.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
     const local = fileURLToPath(new URL(`../node_modules/${pkg}/package.json`, import.meta.url));
-    const inWorkspace = existsSync(local);
+    const inWorkspace = existsSync(local) || (pkg === "dsh-claude-code" && existsSync(fileURLToPath(import.meta.resolve(name))));
     const inRuntime = runtime.has(pkg);
     assert.ok(
       inWorkspace || inRuntime,
       `预设引用了不存在的包：${name}（workspace 与宿主运行时都没有）`,
     );
   }
+});
+
+test("Claude 预设只装一个 native compact 命令提供者", async () => {
+  const row = insertedRows(patch).find((candidate) => candidate.name === "@deepseek-ai/dsh-agent-preset");
+  const compact = [];
+  const walk = (list) => { for (const item of list ?? []) {
+    if (item.id === "command-compact") compact.push(item.name);
+    if (Array.isArray(item.config)) walk(item.config);
+  } };
+  walk(row.config.plugins);
+  assert.deepEqual(compact, ["dsh-claude-code/command-compact"]);
+  assert.equal(typeof (await import("dsh-claude-code/command-compact")).apply, "function");
+});
+
+test("Claude 预设装有人类原生命令模块", async () => {
+  const row = insertedRows(patch).find((candidate) => candidate.name === "@deepseek-ai/dsh-agent-preset");
+  const found = [];
+  const walk = (list) => { for (const item of list ?? []) {
+    if (item.id === "command-native") found.push(item.name);
+    if (Array.isArray(item.config)) walk(item.config);
+  } };
+  walk(row.config.plugins);
+  assert.deepEqual(found, ["dsh-claude-code/command-native"]);
+  assert.equal(typeof (await import("dsh-claude-code/command-native")).apply, "function");
 });
 
 test("组内必填 config 不许省略（plan-mode.section 回归）", () => {
@@ -223,6 +247,7 @@ test("组内必填 config 不许省略（plan-mode.section 回归）", () => {
   assert.equal(typeof planMode.config?.section, "string", "plan-mode.config.section 必填");
   assert.ok(planMode.config.section.trim().length > 100, "section 不能是占位空串");
   assert.match(planMode.config.section, /plan mode/i);
+  assert.equal(find(row.config.plugins, "claude-plan-bridge")?.name, "dsh-claude-code/plan-scope", "隔离 planning 服务必须有 agent-scope bridge");
 
   // 其余组内行若带了 config，也不能是空对象（空对象同样可能触发必填校验）。
   const walk = (list) => {

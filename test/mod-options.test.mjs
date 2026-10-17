@@ -9,6 +9,7 @@ import { RunInputChannel } from "../lib/run-input.mjs";
 import { attachFacts } from "./helpers/plugin-facts.mjs";
 let commandError;
 let commandGate;
+let minimumCommandBudget = 0;
 const commands = [];
 mock.module("node:child_process", { namedExports: { ...childProcess, execFile: (file, args, options, callback) => {
   commands.push({ file, args, options });
@@ -17,6 +18,7 @@ mock.module("node:child_process", { namedExports: { ...childProcess, execFile: (
     if (finished) return;
     finished = true;
     options.signal?.removeEventListener("abort", aborted);
+    if (options.timeout < minimumCommandBudget) error = new Error("offline capability checks timed out");
     callback(error, "Validation passed; 3 pass\n0 fail", "");
   };
   const aborted = () => done(new Error("probe canceled"));
@@ -50,6 +52,12 @@ mock.module("@anthropic-ai/claude-agent-sdk", { namedExports: {
       }
       for await (const input of prompt) {
         record.input.push(input);
+        if (descriptor && handshake) {
+          record.livePermissions = {};
+          for (const name of ["mcp__dsh-bridge__get_goal", "mcp__goal__get_goal", "mcp__dsh-bridge__arbitrary"]) {
+            record.livePermissions[name] = await options.canUseTool(name, {});
+          }
+        }
         if (descriptor && handshake) await call("prompt_snapshot", { model: "model", sections: [{ id: "system", text: "observed", scope: "shared" }] }, "snapshot");
         if (captureFailure) {
           const notice = { type: "system", subtype: "ui_log", plugin: "dsh-bridge", session_id: "c1",
@@ -143,6 +151,22 @@ test("capability 用所选 executable 的 validate/test 证明，不按版本猜
   commandError = undefined;
 });
 
+test("较慢但可用的离线原生测试不被误判不支持", async () => {
+  minimumCommandBudget = 25000;
+  try { assert.equal((await probeModSupport({ executable: "slow-supported-cli", env: {} })).supported, true); }
+  finally { minimumCommandBudget = 0; }
+});
+
+test("维护观察插件使用自己的校验路径与缓存身份", async () => {
+  commands.length = 0;
+  commandError = undefined;
+  const modPath = "/bundled/compact-observer";
+  assert.equal((await probeModSupport({ executable: "observer-cli", env: {}, modPath })).supported, true);
+  assert.ok(commands.every((entry) => entry.args[2] === modPath));
+  await probeModSupport({ executable: "observer-cli", env: {} });
+  assert.equal(commands.length, 4, "不同插件目录不得复用校验结果");
+});
+
 test("取消的能力检查不永久毒化同一 executable 的缓存", async () => {
   const abort = new AbortController();
   commandError = new Error("probe aborted");
@@ -193,9 +217,10 @@ test("真实 runner 单选 mod goal，握手后记录 observed-compose，不写�
   assert.equal(queries[0].options.mcpServers, undefined);
   assert.ok(queries[0].options.plugins.some((plugin) => plugin.path === MOD_PATH));
   const approve = queries[0].options.canUseTool;
-  assert.equal((await approve("mcp__dsh-bridge__get_goal", {})).behavior, "allow");
-  assert.equal((await approve("mcp__goal__get_goal", {})).behavior, "deny");
-  assert.equal((await approve("mcp__dsh-bridge__arbitrary", {})).behavior, "deny");
+  assert.equal(queries[0].livePermissions["mcp__dsh-bridge__get_goal"].behavior, "allow");
+  assert.equal(queries[0].livePermissions["mcp__goal__get_goal"].behavior, "deny");
+  assert.equal(queries[0].livePermissions["mcp__dsh-bridge__arbitrary"].behavior, "deny");
+  assert.equal((await approve("mcp__dsh-bridge__get_goal", {})).behavior, "deny", "closed query permissions must not remain live");
   assert.equal(options.env.DSH_CLAUDE_BRIDGE, undefined);
   const events = options.session.factEvents();
   assert.ok(events.some((event) => event.type === "claude-code/prompt-snapshot" && event.data.source === "observed-compose"));
@@ -234,6 +259,21 @@ test("mod 启动握手失败时未发送输入便关闭，新的查询只用 MCP
     assert.ok(queries[1].options.mcpServers.goal);
     assert.equal(queries[1].options.plugins, undefined);
     assert.equal(queries[1].options.env.DSH_CLAUDE_BRIDGE, undefined);
+  } finally { handshake = true; }
+});
+
+test("Mod handshake 失败后重建 DSH MCP adapter，保留 goal 且不重放输入", async () => {
+  queries.length = 0; handshake = false;
+  const options = runOptions({ mods: { enabled: true, handshakeTimeoutMs: 20 }, goal: { transport: "mod" }, dshTools: { enabled: true, transport: "mod", names: ["job_list"] } });
+  const originalGet = options.ctx.get;
+  options.ctx.get = name => name === "tools" ? { schemas: () => [{ name: "job_list", parameters: { type: "object", properties: {} } }], execute: async () => ({ content: [] }) } : originalGet(name);
+  try {
+    assert.equal((await runClaudeCode(options)).stopReason, "completed");
+    assert.equal(queries.length, 2);
+    assert.equal(queries[0].options.mcpServers, undefined);
+    assert.equal(queries[0].input.length, 0);
+    assert.deepEqual(Object.keys(queries[1].options.mcpServers).sort(), ["dsh", "goal"]);
+    assert.equal(queries[1].input.length, 1);
   } finally { handshake = true; }
 });
 

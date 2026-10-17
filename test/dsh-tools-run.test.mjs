@@ -69,6 +69,30 @@ test("查询结束后，即使 agent 仍显示 running，旧桥也不能执行",
   assert.equal((await handler({}, { _meta: { "claudecode/toolUseId": "late-call" } })).isError, true);
 });
 
+test("runner 收尾等待已取消的宿主工具静默，再返回给 agent", async (t) => {
+  const args = fixture();
+  const started = Promise.withResolvers();
+  let quiet = false; let pending;
+  args.ctx.get = name => name === "tools" ? {
+    schemas: () => [{ name: "job_list", parameters: { type: "object", properties: {} } }],
+    execute: async exec => {
+      started.resolve();
+      await new Promise(resolve => exec.signal.addEventListener("abort", () => setTimeout(resolve, 20), { once: true }));
+      quiet = true;
+      return { content: [{ type: "text", text: "cancelled" }], isError: true };
+    },
+  } : undefined;
+  duringQuery = async function* () {
+    yield { type: "assistant", parent_tool_use_id: null, message: { id: "in-flight", role: "assistant",
+      content: [{ type: "tool_use", id: "live-list", name: "mcp__dsh__job_list", input: {} }] } };
+    pending = options.mcpServers.dsh.tools[0].handler({}, { _meta: { "claudecode/toolUseId": "live-list" } });
+    await started.promise;
+  };
+  t.after(async () => { duringQuery = undefined; await pending; });
+  await runClaudeCode(args);
+  assert.equal(quiet, true);
+});
+
 test("非法桥配置以回合错误结束并清理 abort 监听器", async () => {
   const args = fixture();
   args.config.dshTools.names = "present";

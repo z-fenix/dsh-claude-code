@@ -1,0 +1,6 @@
+{
+  "name": "dsh-compact-observer",
+  "version": "0.1.0",
+  "author": { "name": "dsh-claude-code contributors" },
+  "description": "Observe a single authorized native compact without sharing its caller's re-entry frame."
+}

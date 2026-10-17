@@ -6,6 +6,9 @@
   "main": "./index.mjs",
   "exports": {
     ".": "./index.mjs",
+    "./command-compact": "./lib/command-compact.mjs",
+    "./command-native": "./lib/command-native.mjs",
+    "./plan-scope": "./lib/plan-scope.mjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
